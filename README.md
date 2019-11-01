@@ -10,9 +10,7 @@ It is different than the AF_ALG engine that ships with OpenSSL:
  - it uses sync calls, instead of async
  - it supports more ciphers, and digests
 
-This engine requires AF_ALG support from the kernel.  In order to decide if
-an algorithm is using hardware acceleration or not, it needs the crypto-user
-module as well.
+This engine requires AF_ALG support from the kernel.
 
 There are some caveats when using this engine, which apply to the hardware
 crypto engines that ship with OpenSSL as well:
@@ -98,8 +96,8 @@ enabled and the configuration commands accepted by the engine:
 Obtaining Information about the Engine
 --------------------------------------
 
-You will need to have the `crypto_user` kernel module to see the driver and
-acceleration information.
+You will need to have the `crypto_user` kernel module to see driver
+information.
 
 To see a list of algorithms supported by engine, and some diagnostic info,
 such as the kernel driver being used and whether or not it is
@@ -118,9 +116,9 @@ Here's a sample output:
     Cipher AES-128-CBC, NID=419, AF_ALG info: name=cbc(aes),  driver=mv-cbc-aes (hw accelerated)
     Cipher AES-192-CBC, NID=423, AF_ALG info: name=cbc(aes),  driver=mv-cbc-aes (hw accelerated)
     Cipher AES-256-CBC, NID=427, AF_ALG info: name=cbc(aes),  driver=mv-cbc-aes (hw accelerated)
-    Cipher AES-128-CTR, NID=904, AF_ALG info: name=ctr(ecb(aes)), AF_ALG socket bind failed.
-    Cipher AES-192-CTR, NID=905, AF_ALG info: name=ctr(ecb(aes)), AF_ALG socket bind failed.
-    Cipher AES-256-CTR, NID=906, AF_ALG info: name=ctr(ecb(aes)), AF_ALG socket bind failed.
+    Cipher AES-128-CTR, NID=904, AF_ALG info: name=ctr(aes), AF_ALG socket bind failed.
+    Cipher AES-192-CTR, NID=905, AF_ALG info: name=ctr(aes), AF_ALG socket bind failed.
+    Cipher AES-256-CTR, NID=906, AF_ALG info: name=ctr(aes), AF_ALG socket bind failed.
     Cipher AES-128-ECB, NID=418, AF_ALG info: name=ecb(aes),  driver=mv-ecb-aes (hw accelerated)
     Cipher AES-192-ECB, NID=422, AF_ALG info: name=ecb(aes),  driver=mv-ecb-aes (hw accelerated)
     Cipher AES-256-ECB, NID=426, AF_ALG info: name=ecb(aes),  driver=mv-ecb-aes (hw accelerated)
