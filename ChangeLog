@@ -1,0 +1,6 @@
+1.0.1:
+- Fix for selecting CIPHERS=NO_ECB
+
+1.0.0:
+- Initial release
+
