@@ -1403,8 +1403,7 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
             return 1;
         if (strcasecmp((const char *)p, "NO_ECB") == 0) {
 	    afalg_select_all_ciphers(selected_ciphers, 0);
-	}
-        if (strcasecmp((const char *)p, "ALL") == 0) {
+	} else if (strcasecmp((const char *)p, "ALL") == 0) {
             afalg_select_all_ciphers(selected_ciphers, 1);
         } else if (strcasecmp((const char*)p, "NONE") == 0) {
             memset(selected_ciphers, 0, sizeof(selected_ciphers));
