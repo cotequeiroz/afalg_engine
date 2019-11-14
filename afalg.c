@@ -417,6 +417,7 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
     const struct cipher_data_st *cipher_d =
         get_cipher_data(EVP_CIPHER_CTX_nid(ctx));
 
+    (void)iv;
     if (cipher_ctx->bfd == -1) {
         if (EVP_CIPHER_CTX_mode(ctx) == EVP_CIPH_CTR_MODE)
             cipher_ctx->blocksize = cipher_d->blocksize;
@@ -467,6 +468,7 @@ static int afalg_do_cipher(struct cipher_ctx *cipher_ctx, unsigned char *out,
     int use_zc = (inl <= zc_maxsize) && (((size_t)in & pagemask) == 0);
 #endif
 
+    (void)enc;
     memset(&buf, 0, sizeof(buf));
     msg.msg_control = buf;
     msg.msg_controllen = CMSG_SPACE(sizeof(cipher_ctx->op));
@@ -624,6 +626,7 @@ static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
     struct cipher_ctx *to_cipher_ctx;
 
+    (void)p1;
     switch (type) {
 
     case EVP_CTRL_COPY:
@@ -847,6 +850,7 @@ static void destroy_all_cipher_methods(void)
 static int afalg_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
                              const int **nids, int nid)
 {
+    (void)e;
     if (cipher == NULL)
         return get_cipher_nids(nids);
 
@@ -1257,6 +1261,7 @@ static void destroy_all_digest_methods(void)
 static int afalg_digests(ENGINE *e, const EVP_MD **digest,
                              const int **nids, int nid)
 {
+    (void)e;
     if (digest == NULL) {
         *nids = known_digest_nids;
         return known_digest_nids_amount;
@@ -1378,6 +1383,8 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
 {
     int *new_list;
 
+    (void)e;
+    (void)f;
     switch(cmd) {
     case AFALG_CMD_USE_SOFTDRIVERS:
         switch(i) {
@@ -1458,6 +1465,7 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
 
 static int afalg_unload(ENGINE *e)
 {
+    (void)e;
     destroy_all_cipher_methods();
     destroy_all_digest_methods();
 
