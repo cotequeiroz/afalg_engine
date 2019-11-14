@@ -24,6 +24,8 @@
 #  define _GNU_SOURCE
 # endif
 #include <sys/uio.h>
+
+static size_t zc_maxsize, pagemask;
 #endif
 
 #include <string.h>
@@ -462,8 +464,7 @@ static int afalg_do_cipher(struct cipher_ctx *cipher_ctx, unsigned char *out,
     ssize_t nbytes;
     size_t len;
 #ifdef AFALG_ZERO_COPY
-    size_t pagesize;
-    int use_zc;
+    int use_zc = (inl <= zc_maxsize) && (((size_t)in & pagemask) == 0);
 #endif
 
     memset(&buf, 0, sizeof(buf));
@@ -491,8 +492,7 @@ static int afalg_do_cipher(struct cipher_ctx *cipher_ctx, unsigned char *out,
     iov.iov_len = inl;
 
 #ifdef AFALG_ZERO_COPY
-    pagesize=(size_t) sysconf(_SC_PAGESIZE);
-    if ((use_zc = (inl <= (size_t) pagesize * 16) && ((size_t)in % pagesize == 0))) {
+    if (use_zc) {
         msg.msg_iov = NULL;
         msg.msg_iovlen = 0;
         len = 0;
@@ -1024,7 +1024,7 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
     int flags = 0;
 #ifdef AFALG_ZERO_COPY
     struct iovec iov;
-    size_t pagesize;
+    int use_zc = (count <= zc_maxsize) && (((size_t)data & pagemask) == 0);
 #endif
 
     if (count == 0)
@@ -1034,9 +1034,7 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
         return 0;
 
 #ifdef AFALG_ZERO_COPY
-    pagesize=(size_t) sysconf(_SC_PAGESIZE);
-    if (count <= (size_t) pagesize * 16
-        && (size_t)data % pagesize == 0) {
+    if (use_zc) {
         iov.iov_base = (void *)data;
         iov.iov_len = count;
 
@@ -1475,6 +1473,10 @@ static int bind_afalg(ENGINE *e) {
         || !ENGINE_set_ctrl_function(e, afalg_ctrl))
         return 0;
 
+#ifdef AFALG_ZERO_COPY
+    pagemask = sysconf(_SC_PAGESIZE) - 1;
+    zc_maxsize = sysconf(_SC_PAGESIZE) * 16;
+#endif
     prepare_afalg_alg_list();
     prepare_cipher_methods();
     prepare_digest_methods();
