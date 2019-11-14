@@ -55,10 +55,10 @@
 #define AFALG_USE_SOFTWARE        1 /* allow software drivers */
 #define AFALG_REJECT_SOFTWARE     2 /* only disallow confirmed software drivers */
 
-#ifndef AFALG_DEFAULT_USE_SOFDTRIVERS
-# define AFALG_DEFAULT_USE_SOFDTRIVERS AFALG_REJECT_SOFTWARE
+#ifndef AFALG_DEFAULT_USE_SOFTDRIVERS
+# define AFALG_DEFAULT_USE_SOFTDRIVERS AFALG_REJECT_SOFTWARE
 #endif
-static int use_softdrivers = AFALG_DEFAULT_USE_SOFDTRIVERS;
+static int use_softdrivers = AFALG_DEFAULT_USE_SOFTDRIVERS;
 
 /*
  * cipher/digest status & acceleration definitions
@@ -1355,7 +1355,7 @@ static const ENGINE_CMD_DEFN afalg_cmds[] = {
         OPENSSL_MSTR(AFALG_USE_SOFTWARE) "=allow all drivers, "
         OPENSSL_MSTR(AFALG_REJECT_SOFTWARE)
         "=use if acceleration can't be determined) [default="
-        OPENSSL_MSTR(AFALG_DEFAULT_USE_SOFDTRIVERS) "]",
+        OPENSSL_MSTR(AFALG_DEFAULT_USE_SOFTDRIVERS) "]",
     ENGINE_CMD_FLAG_NUMERIC},
 
     {AFALG_CMD_CIPHERS,
