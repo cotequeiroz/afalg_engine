@@ -97,8 +97,6 @@ struct driver_info_st {
         AFALG_ACCELERATION_UNKNOWN =  0, /* acceleration support unkown */
         AFALG_ACCELERATED          =  1  /* hardware accelerated */
     } accelerated;
-
-    char *driver_name;
 };
 
 static int get_afalg_socket(const char *salg_name, const char *salg_type,
@@ -153,6 +151,7 @@ static int prepare_afalg_alg_list(void)
 {
     int ret = -EFAULT;
 
+    fprintf(stderr, "Entering %s:\n", __func__);
     /* NETLINK_CRYPTO specific */
     void *buf = NULL;
     struct nlmsghdr *res_n;
@@ -292,35 +291,34 @@ out:
 }
 #endif
 
-static enum afalg_accelerated_t
-afalg_get_accel_info(const char *alg_name, char *driver_name, size_t driver_len)
+static const char *
+afalg_get_driver_name(const char *alg_name,
+                      enum afalg_accelerated_t expected_accel)
 {
     int i;
     __u32 priority = 0;
     int found = 0;
-    enum afalg_accelerated_t new_accel, cur_accel = AFALG_ACCELERATION_UNKNOWN;
+    enum afalg_accelerated_t accel;
+    const char *driver_name = "unknown";
 
     for (i = 0; i < afalg_alg_list_count; i++) {
         if (strcmp(afalg_alg_list[i].alg_name, alg_name) ||
             priority > afalg_alg_list[i].priority)
             continue;
         if (afalg_alg_list[i].flags & CRYPTO_ALG_KERN_DRIVER_ONLY)
-            new_accel = AFALG_ACCELERATED;
+            accel = AFALG_ACCELERATED;
         else
-            new_accel = AFALG_NOT_ACCELERATED;
-        if (found && priority == afalg_alg_list[i].priority) {
-            OPENSSL_strlcpy(driver_name, "**unreliable info**", driver_len);
-            if (new_accel != cur_accel)
-                cur_accel = AFALG_ACCELERATION_UNKNOWN;
+            accel = AFALG_NOT_ACCELERATED;
+        if (found && priority == afalg_alg_list[i].priority
+            || accel != expected_accel) {
+            driver_name = "**unreliable info**";
         } else {
             found = 1;
-            cur_accel = new_accel;
             priority = afalg_alg_list[i].priority;
-            OPENSSL_strlcpy(driver_name, afalg_alg_list[i].driver_name,
-                            driver_len);
+            driver_name = afalg_alg_list[i].driver_name;
         }
     }
-    return cur_accel;
+    return driver_name;
 }
 
 /******************************************************************************
@@ -759,18 +757,6 @@ static void prepare_cipher_methods(void)
             cipher_driver_info[i].accelerated = AFALG_NOT_ACCELERATED;
         }
 
-        /* gather hardware driver information */
-        if (afalg_alg_list_count > 0
-            && (cipher_driver_info[i].driver_name =
-                OPENSSL_zalloc(CRYPTO_MAX_NAME)) != NULL
-            && cipher_driver_info[i].accelerated !=
-               afalg_get_accel_info(cipher_data[i].name,
-                                    cipher_driver_info[i].driver_name,
-                                    CRYPTO_MAX_NAME)) {
-            OPENSSL_strlcpy(cipher_driver_info[i].driver_name,
-                            "**unreliable info**", CRYPTO_MAX_NAME);
-            cipher_driver_info[i].accelerated = AFALG_ACCELERATION_UNKNOWN;
-        }
         blocksize = cipher_data[i].blocksize;
         switch (cipher_data[i].flags & EVP_CIPH_MODE) {
         case EVP_CIPH_CBC_MODE:
@@ -857,11 +843,8 @@ static void destroy_all_cipher_methods(void)
 {
     size_t i;
 
-    for (i = 0; i < OSSL_NELEM(cipher_data); i++) {
+    for (i = 0; i < OSSL_NELEM(cipher_data); i++)
         destroy_cipher_method(cipher_data[i].nid);
-        OPENSSL_free(cipher_driver_info[i].driver_name);
-        cipher_driver_info[i].driver_name = NULL;
-    }
 }
 
 static int afalg_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
@@ -914,28 +897,37 @@ static int afalg_select_cipher_cb(const char *str, int len, void *usr)
 static void dump_cipher_info(void)
 {
     size_t i;
-    const char *evp_name;
+    const char *evp_name, *driver_name;
 
     fprintf (stderr, "Information about ciphers supported by the AF_ALG"
              " engine:\n");
 
     for (i = 0; i < OSSL_NELEM(cipher_data); i++) {
         evp_name = OBJ_nid2sn(cipher_data[i].nid);
-        fprintf (stderr, "Cipher %s, NID=%d, AF_ALG info: name=%s, ",
+        fprintf (stderr, "Cipher %s, NID=%d, AF_ALG info: name=%s",
                  evp_name ? evp_name : "unknown", cipher_data[i].nid,
                  cipher_data[i].name);
         if (cipher_driver_info[i].status == AFALG_STATUS_NO_OPEN) {
-            fprintf (stderr, "AF_ALG socket bind failed.\n");
+            fprintf (stderr, ". AF_ALG socket bind failed.\n");
             continue;
         }
-        fprintf(stderr, " driver=%s ", cipher_driver_info[i].driver_name ?
-                 cipher_driver_info[i].driver_name : "unknown");
+#ifndef AFALG_NO_CRYPTOUSER
+        /* gather hardware driver information */
+        if (afalg_alg_list_count > 0) {
+            driver_name =
+                afalg_get_driver_name(cipher_data[i].name,
+                                      cipher_driver_info[i].accelerated);
+        } else {
+            driver_name = "unknown";
+        }
+        fprintf(stderr, ", driver=%s", driver_name);
+#endif
         if (cipher_driver_info[i].accelerated == AFALG_ACCELERATED)
-            fprintf (stderr, "(hw accelerated)");
+            fprintf (stderr, " (hw accelerated)");
         else if (cipher_driver_info[i].accelerated == AFALG_NOT_ACCELERATED)
-            fprintf(stderr, "(software)");
+            fprintf(stderr, " (software)");
         else
-            fprintf(stderr, "(acceleration status unknown)");
+            fprintf(stderr, " (acceleration status unknown)");
         if (cipher_driver_info[i].status == AFALG_STATUS_FAILURE)
             fprintf (stderr, ". Cipher setup failed.");
         fprintf (stderr, "\n");
@@ -1220,19 +1212,6 @@ static void prepare_digest_methods(void)
             digest_driver_info[i].accelerated = AFALG_NOT_ACCELERATED;
         }
 
-        /* gather hardware driver information */
-        if (afalg_alg_list_count > 0
-            && (digest_driver_info[i].driver_name =
-                OPENSSL_zalloc(CRYPTO_MAX_NAME)) != NULL
-            && digest_driver_info[i].accelerated !=
-               afalg_get_accel_info(digest_data[i].name,
-                                    digest_driver_info[i].driver_name,
-                                    CRYPTO_MAX_NAME)) {
-            OPENSSL_strlcpy(digest_driver_info[i].driver_name,
-                            "**unreliable info**", CRYPTO_MAX_NAME);
-            digest_driver_info[i].accelerated = AFALG_ACCELERATION_UNKNOWN;
-        }
-
         if ((known_digest_methods[i] = EVP_MD_meth_new(digest_data[i].nid,
                                                        NID_undef)) == NULL
             || !EVP_MD_meth_set_input_blocksize(known_digest_methods[i],
@@ -1278,11 +1257,8 @@ static void destroy_all_digest_methods(void)
 {
     size_t i;
 
-    for (i = 0; i < OSSL_NELEM(digest_data); i++) {
+    for (i = 0; i < OSSL_NELEM(digest_data); i++)
         destroy_digest_method(digest_data[i].nid);
-        OPENSSL_free(digest_driver_info[i].driver_name);
-        digest_driver_info[i].driver_name = NULL;
-    }
 }
 
 static int afalg_digests(ENGINE *e, const EVP_MD **digest,
@@ -1331,28 +1307,37 @@ static int afalg_select_digest_cb(const char *str, int len, void *usr)
 static void dump_digest_info(void)
 {
     size_t i;
-    const char *evp_name;
+    const char *evp_name, *driver_name;
 
     fprintf (stderr, "Information about digests supported by the AF_ALG"
              " engine:\n");
 
     for (i = 0; i < OSSL_NELEM(digest_data); i++) {
         evp_name = OBJ_nid2sn(digest_data[i].nid);
-        fprintf (stderr, "Digest %s, NID=%d, AF_ALG info: name=%s, ",
+        fprintf (stderr, "Digest %s, NID=%d, AF_ALG info: name=%s",
                  evp_name ? evp_name : "unknown", digest_data[i].nid,
                  digest_data[i].name);
         if (digest_driver_info[i].status == AFALG_STATUS_NO_OPEN) {
-            fprintf (stderr, "AF_ALG socket bind failed.\n");
+            fprintf (stderr, ". AF_ALG socket bind failed.\n");
             continue;
         }
-        fprintf(stderr, " driver=%s ", digest_driver_info[i].driver_name ?
-                 digest_driver_info[i].driver_name : "unknown");
+#ifndef AFALG_NO_CRYPTOUSER
+        /* gather hardware driver information */
+        if (afalg_alg_list_count > 0) {
+            driver_name =
+                afalg_get_driver_name(digest_data[i].name,
+                                      digest_driver_info[i].accelerated);
+        } else {
+            driver_name = "unknown";
+        }
+        fprintf(stderr, ", driver=%s", driver_name);
+#endif
         if (digest_driver_info[i].accelerated == AFALG_ACCELERATED)
-            fprintf (stderr, "(hw accelerated)");
+            fprintf (stderr, " (hw accelerated)");
         else if (digest_driver_info[i].accelerated == AFALG_NOT_ACCELERATED)
-            fprintf(stderr, "(software)");
+            fprintf(stderr, " (software)");
         else
-            fprintf(stderr, "(acceleration status unknown)");
+            fprintf(stderr, " (acceleration status unknown)");
         if (digest_driver_info[i].status == AFALG_STATUS_FAILURE)
             fprintf (stderr, ". Digest setup failed.");
         fprintf (stderr, "\n");
@@ -1472,6 +1457,8 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
 
     case AFALG_CMD_DUMP_INFO:
 #ifndef AFALG_NO_CRYPTOUSER
+        prepare_afalg_alg_list();
+        fprintf(stderr, "afalg_alg_list_count=%d\n", afalg_alg_list_count);
         if (afalg_alg_list_count < 0)
             fprintf (stderr, "Could not get driver info through the netlink"
                      " interface.\nIs the 'crypto_user' module loaded?\n");
@@ -1513,9 +1500,6 @@ static int bind_afalg(ENGINE *e) {
 #ifdef AFALG_ZERO_COPY
     pagemask = sysconf(_SC_PAGESIZE) - 1;
     zc_maxsize = sysconf(_SC_PAGESIZE) * 16;
-#endif
-#ifndef AFALG_NO_CRYPTOUSER
-    prepare_afalg_alg_list();
 #endif
     prepare_cipher_methods();
     prepare_digest_methods();
