@@ -1,3 +1,12 @@
+1.1.0:
+- Speed up updates by setting IV and key during initialization
+- Speed up initialization by querying driver info only when DUMP_INFO is called
+- Enforce use of accelerated drivers in algo init, when USE_SOFTDRIVERS == 0
+- Allow compilation without crypto_user information
+- Let the kernel drivers handle CBC IV updates
+- Add option to let kernel handle CTR IV updates.  Not all drivers do this
+- This version is up to 20% faster than 1.0.1
+
 1.0.1:
 - Fix for selecting CIPHERS=NO_ECB
 
