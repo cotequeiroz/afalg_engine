@@ -1,3 +1,11 @@
+1.2.0:
+- Use software as a fallback when en/decrypting small batches, or when the
+total length of the digest input is small; this greatly improves performace
+with TLS, for example
+- Update CTR-mode counter using 64-bit integers
+- Disable building digests by default
+- Fix context copying, which was broken for digests and ciphers
+
 1.1.0:
 - Speed up updates by setting IV and key during initialization
 - Speed up initialization by querying driver info only when DUMP_INFO is called
