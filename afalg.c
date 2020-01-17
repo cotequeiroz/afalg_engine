@@ -454,12 +454,18 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
     size_t set_iv_len = offsetof(struct af_alg_iv, iv) + ivlen;
     size_t controllen = CMSG_SPACE(set_op_len)
                         + (ivlen > 0 ? CMSG_SPACE(set_iv_len) : 0);
+    __u32 afalg_mask;
 
     if (cipher_ctx->bfd == -1) {
         if (EVP_CIPHER_CTX_mode(ctx) == EVP_CIPH_CTR_MODE)
             cipher_ctx->blocksize = cipher_d->blocksize;
-        if ((cipher_ctx->bfd =
-             get_afalg_socket(cipher_d->name, "skcipher", 0, 0)) < 0) {
+        if (use_softdrivers == AFALG_REQUIRE_ACCELERATED)
+            afalg_mask = CRYPTO_ALG_KERN_DRIVER_ONLY;
+        else
+            afalg_mask = 0;
+        cipher_ctx->bfd = get_afalg_socket(cipher_d->name, "skcipher",
+                                           afalg_mask, afalg_mask);
+        if (cipher_ctx->bfd < 0) {
             SYSerr(SYS_F_BIND, errno);
             return 0;
         }
@@ -1008,12 +1014,18 @@ static int digest_init(EVP_MD_CTX *ctx)
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
     const struct digest_data_st *digest_d =
         get_digest_data(EVP_MD_CTX_type(ctx));
+    __u32 afalg_mask;
 
     digest_ctx->init_called = 1;
 
     digest_ctx->sfd = -1;
-    if ((digest_ctx->bfd =
-        get_afalg_socket(digest_d->name, "hash",0 ,0)) < 0) {
+    if (use_softdrivers == AFALG_REQUIRE_ACCELERATED)
+        afalg_mask = CRYPTO_ALG_KERN_DRIVER_ONLY;
+    else
+        afalg_mask = 0;
+    digest_ctx->bfd = get_afalg_socket(digest_d->name, "hash",
+                                       afalg_mask, afalg_mask);
+    if (digest_ctx->bfd < 0) {
         SYSerr(SYS_F_BIND, errno);
         return 0;
     }
