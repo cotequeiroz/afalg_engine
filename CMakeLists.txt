@@ -15,6 +15,8 @@
 cmake_minimum_required(VERSION 2.6 FATAL_ERROR)
 project(afalg_engine LANGUAGES C)
 
+include(CheckIncludeFile)
+
 find_package(OpenSSL 1.1.0 REQUIRED)
 include_directories(${OPENSSL_INCLUDE_DIR})
 
@@ -26,6 +28,17 @@ if ("${OPENSSL_ENGINES_DIR}" STREQUAL "")
 	if ("${OPENSSL_ENGINES_DIR}" STREQUAL "")
 		message( FATAL_ERROR "Unable to discover the OpenSSL engines directory. Provide the path using -DOPENSSL_ENGINES_DIR" )
 	endif()
+endif()
+
+option(USE_CRYPTOUSER "Use crypto_user module to display driver information" ON)
+if (USE_CRYPTOUSER)
+	check_include_file(linux/cryptouser.h HAVE_CRYPTOUSER_H)
+	if (NOT HAVE_CRYPTOUSER_H)
+		message( WARNING "Unable to find linux/cryptouser.h, disabling display of driver information" )
+		add_definitions(-DAFALG_NO_CRYPTOUSER)
+	endif()
+else()
+	add_definitions(-DAFALG_NO_CRYPTOUSER)
 endif()
 
 option(USE_ZERO_COPY "Use zero-copy AF_ALG interface" OFF)

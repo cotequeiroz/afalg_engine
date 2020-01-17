@@ -37,7 +37,11 @@ static size_t zc_maxsize, pagemask;
 #include <unistd.h>
 #include <assert.h>
 #include <asm/types.h>
-#include <linux/cryptouser.h>
+#ifndef AFALG_NO_CRYPTOUSER
+# include <linux/cryptouser.h>
+#elif !defined(CRYPTO_MAX_NAME)
+# define CRYPTO_MAX_NAME 64
+#endif
 #include <linux/if_alg.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
@@ -144,6 +148,7 @@ struct afalg_alg_info {
 static struct afalg_alg_info *afalg_alg_list = NULL;
 static int afalg_alg_list_count = -1; /* no info available */
 
+#ifndef AFALG_NO_CRYPTOUSER
 static int prepare_afalg_alg_list(void)
 {
     int ret = -EFAULT;
@@ -285,6 +290,7 @@ out:
     OPENSSL_free(buf);
     return ret;
 }
+#endif
 
 static enum afalg_accelerated_t
 afalg_get_accel_info(const char *alg_name, char *driver_name, size_t driver_len)
@@ -1453,9 +1459,11 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
         return 1;
 
     case AFALG_CMD_DUMP_INFO:
+#ifndef AFALG_NO_CRYPTOUSER
         if (afalg_alg_list_count < 0)
             fprintf (stderr, "Could not get driver info through the netlink"
                      " interface.\nIs the 'crypto_user' module loaded?\n");
+#endif
         dump_cipher_info();
         dump_digest_info();
         return 1;
@@ -1494,7 +1502,9 @@ static int bind_afalg(ENGINE *e) {
     pagemask = sysconf(_SC_PAGESIZE) - 1;
     zc_maxsize = sysconf(_SC_PAGESIZE) * 16;
 #endif
+#ifndef AFALG_NO_CRYPTOUSER
     prepare_afalg_alg_list();
+#endif
     prepare_cipher_methods();
     prepare_digest_methods();
     OPENSSL_free(afalg_alg_list);
