@@ -33,6 +33,11 @@ if (USE_ZERO_COPY)
 	add_definitions(-DAFALG_ZERO_COPY)
 endif()
 
+option(UPDATE_CTR_IV "Don't rely on kernel driver to update CTR-mode IV" ON)
+if (NOT UPDATE_CTR_IV)
+	add_definitions(-DAFALG_KERNEL_UPDATES_CTR_IV)
+endif()
+
 add_library(afalg_engine MODULE afalg.c)
 set_target_properties(afalg_engine PROPERTIES PREFIX "" OUTPUT_NAME "afalg")
 target_link_libraries(afalg_engine ${OPENSSL_CRYPTO_LIBRARY})

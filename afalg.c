@@ -567,12 +567,18 @@ err:
 
 static void ctr_updateiv(unsigned char* iv, size_t ivlen, size_t nblocks)
 {
+#ifndef AFALG_KERNEL_UPDATES_IV
     do {
         ivlen--;
         nblocks += iv[ivlen];
         iv[ivlen] = (uint8_t) nblocks;
         nblocks >>= 8;
     } while (ivlen);
+#else
+    (void)iv;
+    (void)ivlen;
+    (void)nblocks;
+#endif
 }
 
 static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
