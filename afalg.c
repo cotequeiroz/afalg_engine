@@ -328,7 +328,7 @@ struct cipher_ctx {
 #ifdef AFALG_ZERO_COPY
     int pipes[2];
 #endif
-    unsigned int op, blocksize, num;
+    unsigned int blocksize, num;
     unsigned char partial[EVP_MAX_BLOCK_LENGTH];
 };
 
@@ -404,6 +404,34 @@ static const struct cipher_data_st *get_cipher_data(int nid)
     return &cipher_data[get_cipher_data_index(nid)];
 }
 
+static int afalg_set_key(int sfd, const void *key, int keylen)
+{
+    if (setsockopt(sfd, SOL_ALG, ALG_SET_KEY, key, keylen) >= 0)
+        return 1;
+    SYSerr(SYS_F_SETSOCKOPT, errno);
+    return 0;
+}
+
+static void afalg_set_op(struct cmsghdr *cmsg, unsigned int op)
+{
+    cmsg->cmsg_level = SOL_ALG;
+    cmsg->cmsg_type = ALG_SET_OP;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(op));
+    *(CMSG_DATA(cmsg)) = op;
+}
+
+static void afalg_set_iv(struct cmsghdr *cmsg, const unsigned char *iv, unsigned int ivlen)
+{
+    struct af_alg_iv *aiv;
+
+    cmsg->cmsg_level = SOL_ALG;
+    cmsg->cmsg_type = ALG_SET_IV;
+    cmsg->cmsg_len = CMSG_LEN(offsetof(struct af_alg_iv, iv) + ivlen);
+    aiv = (void *)CMSG_DATA(cmsg);
+    aiv->ivlen = ivlen;
+    memcpy(aiv->iv, iv, ivlen);
+}
+
 static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
                        const unsigned char *iv, int enc)
 {
@@ -411,8 +439,16 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
     const struct cipher_data_st *cipher_d =
         get_cipher_data(EVP_CIPHER_CTX_nid(ctx));
+    int keylen;
+    struct msghdr msg = { 0 };
+    struct cmsghdr *cmsg;
+    int op = enc ? ALG_OP_ENCRYPT : ALG_OP_DECRYPT;
+    size_t set_op_len = sizeof(op);
+    size_t ivlen = (iv == NULL) ? 0 : EVP_CIPHER_CTX_iv_length(ctx);
+    size_t set_iv_len = offsetof(struct af_alg_iv, iv) + ivlen;
+    size_t controllen = CMSG_SPACE(set_op_len)
+                        + (ivlen > 0 ? CMSG_SPACE(set_iv_len) : 0);
 
-    (void)iv;
     if (cipher_ctx->bfd == -1) {
         if (EVP_CIPHER_CTX_mode(ctx) == EVP_CIPH_CTR_MODE)
             cipher_ctx->blocksize = cipher_d->blocksize;
@@ -421,118 +457,117 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
             SYSerr(SYS_F_BIND, errno);
             return 0;
         }
-        cipher_ctx->op = enc ? ALG_OP_ENCRYPT : ALG_OP_DECRYPT;
     } else {
         close(cipher_ctx->sfd);
         cipher_ctx->sfd = -1;
     }
-    if ((key == NULL
-         || setsockopt(cipher_ctx->bfd, SOL_ALG, ALG_SET_KEY, key,
-                       EVP_CIPHER_CTX_key_length(ctx)) >= 0)
-        && (cipher_ctx->sfd = accept(cipher_ctx->bfd, NULL, 0)) >= 0
+    if (key != NULL
+        && (keylen = EVP_CIPHER_CTX_key_length(ctx)) > 0
+        && !afalg_set_key(cipher_ctx->bfd, key, keylen)) {
+        fprintf(stderr, "cipher_init: Error setting key.\n");
+        goto err;
+    }
+    if ((cipher_ctx->sfd = accept(cipher_ctx->bfd, NULL, 0)) < 0) {
+        perror("cipher_init: accept");
+        goto err;
+    }
+    if ((msg.msg_control = OPENSSL_zalloc(controllen)) == NULL) {
+        perror("cipher_init: OPENSSL_zalloc");
+        goto err_close;
+    }
+    msg.msg_controllen = controllen;
+    if ((cmsg = CMSG_FIRSTHDR(&msg)) == NULL) {
+        fprintf(stderr, "cipher_init: CMSG_FIRSTHDR error setting op.\n");
+        goto err;
+    }
+    afalg_set_op(cmsg, op);
+    if (ivlen > 0) {
+        if ((cmsg = CMSG_NXTHDR(&msg, cmsg)) == NULL)
+            goto err;
+        afalg_set_iv(cmsg, iv, ivlen);
+    }
+    if (sendmsg(cipher_ctx->sfd, &msg, 0) < 0) {
+        perror("cipher_init: sendmsg");
+        goto err;
+    }
 #ifdef AFALG_ZERO_COPY
-        && pipe(cipher_ctx->pipes) == 0
+    if (pipe(cipher_ctx->pipes) < 0) {
+        perror("cipher_init: pipes");
+        goto err;
+    }
 #endif
-        )
-        return 1;
+    return 1;
 
+err:
+    free(msg.msg_control);
+err_close:
     close(cipher_ctx->bfd);
     if (cipher_ctx->sfd >= 0) {
-        perror("cipher_init: accept");
         close(cipher_ctx->sfd);
         cipher_ctx->sfd = -1;
-    } else {
-        perror("cipher_init: setsockopt");
     }
     return 0;
 }
 
-static int afalg_do_cipher(struct cipher_ctx *cipher_ctx, unsigned char *out,
-                           const unsigned char *in, size_t inl, int enc,
-                           const unsigned char *iv, size_t ivlen)
+static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                           const unsigned char *in, size_t inl)
 {
-    struct msghdr msg = { 0 };
-    struct cmsghdr *cmsg;
-    struct af_alg_iv *aiv;
+    struct cipher_ctx *cipher_ctx =
+        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    ssize_t ret = -1;
+#ifdef AFALG_ZERO_COPY
     struct iovec iov;
-    char buf[CMSG_SPACE(sizeof(cipher_ctx->op))
-             + CMSG_SPACE(offsetof(struct af_alg_iv, iv) + EVP_MAX_IV_LENGTH)];
-    ssize_t nbytes;
-    size_t len;
-#ifdef AFALG_ZERO_COPY
     int use_zc = (inl <= zc_maxsize) && (((size_t)in & pagemask) == 0);
-#endif
 
-    (void)enc;
-    memset(&buf, 0, sizeof(buf));
-    msg.msg_control = buf;
-    msg.msg_controllen = CMSG_SPACE(sizeof(cipher_ctx->op));
-
-    cmsg = CMSG_FIRSTHDR(&msg);
-    cmsg->cmsg_level = SOL_ALG;
-    cmsg->cmsg_type = ALG_SET_OP;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(cipher_ctx->op));
-    memcpy(CMSG_DATA(cmsg), &cipher_ctx->op, sizeof(cipher_ctx->op));
-
-    if (ivlen > 0) {
-        msg.msg_controllen += CMSG_SPACE(offsetof(struct af_alg_iv, iv) + ivlen);
-        cmsg = CMSG_NXTHDR(&msg, cmsg);
-        cmsg->cmsg_level = SOL_ALG;
-        cmsg->cmsg_type = ALG_SET_IV;
-        cmsg->cmsg_len = CMSG_LEN(offsetof(struct af_alg_iv, iv) + ivlen);
-        aiv = (void *)CMSG_DATA(cmsg);
-        aiv->ivlen = ivlen;
-        memcpy(aiv->iv, iv, ivlen);
-    }
-
-    iov.iov_base = (void *)in;
-    iov.iov_len = inl;
-
-#ifdef AFALG_ZERO_COPY
     if (use_zc) {
-        msg.msg_iov = NULL;
-        msg.msg_iovlen = 0;
-        len = 0;
-    } else {
-        msg.msg_iov = &iov;
-        msg.msg_iovlen = 1;
-        len = inl;
-    }
-#else
-    len = inl;
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
+        iov.iov_base = (void *)in;
+	iov.iov_len = inl;
+        ret = vmsplice(cipher_ctx->pipes[1], &iov, 1,
+                       SPLICE_F_GIFT & SPLICE_F_MORE);
+        if (ret < 0) {
+            perror("afalg_do_cipher: vmsplice");
+            goto err;
+        } else if (ret != (ssize_t) inl) {
+            fprintf(stderr,
+                    "afalg_do_cipher: vmsplice: sent %zd bytes != len %zd\n",
+                    ret, inl);
+            goto err;
+        }
+        ret = splice(cipher_ctx->pipes[0], NULL, cipher_ctx->sfd, NULL, inl, 0);
+        if (ret < 0) {
+            perror("afalg_do_cipher: splice");
+            goto err;
+        } else if (ret != (ssize_t) inl) {
+            fprintf(stderr,
+                    "afalg_do_cipher: splice: spliced %zd bytes != len %zd\n",
+                    ret, inl);
+            goto err;
+        }
+    } else
 #endif
-    if ((nbytes = sendmsg(cipher_ctx->sfd, &msg, 0)) < 0) {
-        perror ("afalg_do_cipher: sendmsg");
-        return -1;
-    } else if (nbytes != (ssize_t) len) {
-        fprintf(stderr, "afalg_do_cipher: sent %zd bytes != len %zd\n",
-                nbytes, len);
-        return -1;
+    {
+        if ((ret = send(cipher_ctx->sfd, in, inl, MSG_MORE)) < 0) {
+            perror("afalg_do_cipher: send");
+            goto err;
+        } else if (ret != (ssize_t) inl) {
+            fprintf(stderr, "afalg_do_cipher: sent %zd bytes != len %zd\n",
+                    ret, inl);
+            goto err;
+        }
     }
+    if ((ret = read(cipher_ctx->sfd, out, inl)) == (ssize_t) inl)
+        return 1;
 
-#ifdef AFALG_ZERO_COPY
-    if (use_zc &&
-        (vmsplice(cipher_ctx->pipes[1], &iov, 1, SPLICE_F_GIFT) < 0
-         || splice(cipher_ctx->pipes[0], NULL, cipher_ctx->sfd, NULL, inl, 0) < 0))
-        return 0;
-#endif
+    fprintf(stderr, "afalg_do_cipher: read %zd bytes != len %zd\n",
+            ret, inl);
 
-    if ((nbytes = read(cipher_ctx->sfd, out, inl)) != (ssize_t) inl) {
-        fprintf(stderr, "afalg_do_cipher: read %zd bytes != inlen %zd\n",
-                nbytes, inl);
-        return -1;
-    }
-
-    return nbytes;
+err:
+    return 0;
 }
 
 static int cbc_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
                          const unsigned char *in, size_t inl)
 {
-    struct cipher_ctx *cipher_ctx =
-        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
     int enc = EVP_CIPHER_CTX_encrypting(ctx);
     size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx);
     unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
@@ -542,7 +577,7 @@ static int cbc_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     assert(inl >= ivlen);
     if (!enc)
         memcpy(saved_iv, in + inl - ivlen, ivlen);
-    if ((outl = afalg_do_cipher(cipher_ctx, out, in, inl, enc, iv, ivlen)) < 1)
+    if ((outl = afalg_do_cipher(ctx, out, in, inl)) < 1)
         return outl;
     memcpy(iv, enc ? out + inl - ivlen : saved_iv, ivlen);
 
@@ -564,7 +599,6 @@ static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 {
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
-    int enc = EVP_CIPHER_CTX_encrypting(ctx);
     size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx), nblocks, len;
     unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
 
@@ -579,7 +613,7 @@ static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     if (inl > (unsigned int) cipher_ctx->blocksize) {
       nblocks = inl/cipher_ctx->blocksize;
       len = nblocks * cipher_ctx->blocksize;
-      if (afalg_do_cipher(cipher_ctx, out, in, len, enc, iv, ivlen) < 1)
+      if (afalg_do_cipher(ctx, out, in, len) < 1)
           return 0;
       ctr_updateiv(iv, ivlen, nblocks);
       inl -= len;
@@ -590,9 +624,8 @@ static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     /* process final partial block */
     if (inl) {
         memset(cipher_ctx->partial, 0, cipher_ctx->blocksize);
-        if (afalg_do_cipher(cipher_ctx, cipher_ctx->partial,
-                            cipher_ctx->partial, cipher_ctx->blocksize, enc,
-                            iv, ivlen) < 1)
+        if (afalg_do_cipher(ctx, cipher_ctx->partial, cipher_ctx->partial,
+                            cipher_ctx->blocksize) < 1)
             return 0;
         ctr_updateiv(iv, ivlen, 1);
         while (inl--) {
@@ -603,16 +636,6 @@ static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     }
 
     return 1;
-}
-
-static int ecb_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
-                         const unsigned char *in, size_t inl)
-{
-    struct cipher_ctx *cipher_ctx =
-        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
-    int enc = EVP_CIPHER_CTX_encrypting(ctx);
-
-    return afalg_do_cipher(cipher_ctx, out, in, inl, enc, NULL, 0);
 }
 
 static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
@@ -759,7 +782,7 @@ static void prepare_cipher_methods(void)
             blocksize = 1;
             break;
         case EVP_CIPH_ECB_MODE:
-            do_cipher = ecb_do_cipher;
+            do_cipher = afalg_do_cipher;
             selected_ciphers[i] = 0;
             break;
         default:
@@ -860,10 +883,10 @@ static void afalg_select_all_ciphers(int *cipher_list, int include_ecb)
 
     for (i = 0; i < OSSL_NELEM(cipher_data); i++) {
         if (include_ecb ||
-            ((cipher_data[i].flags & EVP_CIPH_MODE) != EVP_CIPH_ECB_MODE))
+           ((cipher_data[i].flags & EVP_CIPH_MODE) != EVP_CIPH_ECB_MODE))
             cipher_list[i] = 1;
-        else
-            cipher_list[i] = 0;
+       else
+           cipher_list[i] = 0;
     }
 }
 
@@ -1020,7 +1043,7 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
 {
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
-    int flags = 0;
+    int flags;
 #ifdef AFALG_ZERO_COPY
     struct iovec iov;
     int use_zc = (count <= zc_maxsize) && (((size_t)data & pagemask) == 0);
@@ -1037,10 +1060,12 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
         iov.iov_base = (void *)data;
         iov.iov_len = count;
 
-        if (!EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
-            flags = SPLICE_F_MORE;
+        if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
+            flags = SPLICE_F_GIFT;
+        else
+            flags = SPLICE_F_MORE | SPLICE_F_GIFT;
 
-        if (vmsplice(digest_ctx->pipes[1], &iov, 1, flags | SPLICE_F_GIFT) >=0
+        if (vmsplice(digest_ctx->pipes[1], &iov, 1, flags) >=0
             && splice(digest_ctx->pipes[0], NULL, digest_ctx->sfd, NULL,
                       count, flags) >0)
             return 1;
@@ -1048,7 +1073,9 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
     else
 #endif
     {
-        if (!EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
+        if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
+            flags = 0;
+        else
             flags = MSG_MORE;
 
         if (send(digest_ctx->sfd, data, count, flags) == (ssize_t)count)
