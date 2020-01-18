@@ -23,7 +23,7 @@
 # ifndef _GNU_SOURCE
 #  define _GNU_SOURCE
 # endif
-#include <sys/uio.h>
+# include <sys/uio.h>
 
 static size_t zc_maxsize, pagemask;
 #endif
@@ -47,6 +47,18 @@ static size_t zc_maxsize, pagemask;
 #include <openssl/err.h>
 #include <openssl/engine.h>
 #include <openssl/objects.h>
+
+/* linux/crypto.h is not public, so we must define the type and masks here,
+ * and hope they are still valid. */
+#ifndef CRYPTO_ALG_TYPE_MASK
+# define CRYPTO_ALG_TYPE_MASK            0x0000000f
+# define CRYPTO_ALG_TYPE_BLKCIPHER       0x00000004
+# define CRYPTO_ALG_TYPE_SKCIPHER        0x00000005
+# define CRYPTO_ALG_TYPE_SHASH           0x0000000e
+# define CRYPTO_ALG_TYPE_AHASH           0x0000000f
+# define CRYPTO_ALG_KERN_DRIVER_ONLY     0x00001000
+# define CRYPTO_ALG_INTERNAL             0x00002000
+#endif
 
 #ifndef OSSL_NELEM
 # define OSSL_NELEM(x)                (sizeof(x)/sizeof((x)[0]))
@@ -121,18 +133,6 @@ static int afalg_closefd(int fd)
 #endif
     return ret;
 }
-
-/* linux/crypto.h is not public, so we must define the type and masks here,
- * and hope they are still valid. */
-#ifndef CRYPTO_ALG_TYPE_MASK
-# define CRYPTO_ALG_TYPE_MASK            0x0000000f
-# define CRYPTO_ALG_TYPE_BLKCIPHER       0x00000004
-# define CRYPTO_ALG_TYPE_SKCIPHER        0x00000005
-# define CRYPTO_ALG_TYPE_SHASH           0x0000000e
-# define CRYPTO_ALG_TYPE_AHASH           0x0000000f
-# define CRYPTO_ALG_KERN_DRIVER_ONLY     0x00001000
-# define CRYPTO_ALG_INTERNAL             0x00002000
-#endif
 
 struct afalg_alg_info {
     char alg_name[CRYPTO_MAX_NAME];
@@ -404,11 +404,6 @@ static const struct cipher_data_st *get_cipher_data(int nid)
     return &cipher_data[get_cipher_data_index(nid)];
 }
 
-/*
- * Following are the three necessary functions to map OpenSSL functionality
- * with AF_ALG.
- */
-
 static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
                        const unsigned char *iv, int enc)
 {
@@ -509,10 +504,10 @@ static int afalg_do_cipher(struct cipher_ctx *cipher_ctx, unsigned char *out,
     msg.msg_iovlen = 1;
 #endif
     if ((nbytes = sendmsg(cipher_ctx->sfd, &msg, 0)) < 0) {
-        perror ("cipher_do_cipher: sendmsg");
+        perror ("afalg_do_cipher: sendmsg");
         return -1;
     } else if (nbytes != (ssize_t) len) {
-        fprintf(stderr, "cipher_do_cipher: sent %zd bytes != len %zd\n",
+        fprintf(stderr, "afalg_do_cipher: sent %zd bytes != len %zd\n",
                 nbytes, len);
         return -1;
     }
@@ -525,7 +520,7 @@ static int afalg_do_cipher(struct cipher_ctx *cipher_ctx, unsigned char *out,
 #endif
 
     if ((nbytes = read(cipher_ctx->sfd, out, inl)) != (ssize_t) inl) {
-        fprintf(stderr, "cipher_do_cipher: read %zd bytes != inlen %zd\n",
+        fprintf(stderr, "afalg_do_cipher: read %zd bytes != inlen %zd\n",
                 nbytes, inl);
         return -1;
     }
@@ -765,7 +760,7 @@ static void prepare_cipher_methods(void)
             break;
         case EVP_CIPH_ECB_MODE:
             do_cipher = ecb_do_cipher;
-	    selected_ciphers[i] = 0;
+            selected_ciphers[i] = 0;
             break;
         default:
             cipher_driver_info[i].status = AFALG_STATUS_FAILURE;
@@ -865,10 +860,10 @@ static void afalg_select_all_ciphers(int *cipher_list, int include_ecb)
 
     for (i = 0; i < OSSL_NELEM(cipher_data); i++) {
         if (include_ecb ||
-	    ((cipher_data[i].flags & EVP_CIPH_MODE) != EVP_CIPH_ECB_MODE))
+            ((cipher_data[i].flags & EVP_CIPH_MODE) != EVP_CIPH_ECB_MODE))
             cipher_list[i] = 1;
-	else
-	    cipher_list[i] = 0;
+        else
+            cipher_list[i] = 0;
     }
 }
 
@@ -1407,8 +1402,8 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
         if (p == NULL)
             return 1;
         if (strcasecmp((const char *)p, "NO_ECB") == 0) {
-	    afalg_select_all_ciphers(selected_ciphers, 0);
-	} else if (strcasecmp((const char *)p, "ALL") == 0) {
+            afalg_select_all_ciphers(selected_ciphers, 0);
+        } else if (strcasecmp((const char *)p, "ALL") == 0) {
             afalg_select_all_ciphers(selected_ciphers, 1);
         } else if (strcasecmp((const char*)p, "NONE") == 0) {
             memset(selected_ciphers, 0, sizeof(selected_ciphers));
