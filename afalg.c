@@ -565,25 +565,6 @@ err:
     return 0;
 }
 
-static int cbc_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
-                         const unsigned char *in, size_t inl)
-{
-    int enc = EVP_CIPHER_CTX_encrypting(ctx);
-    size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx);
-    unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
-    unsigned char saved_iv[EVP_MAX_IV_LENGTH];
-    int outl;
-
-    assert(inl >= ivlen);
-    if (!enc)
-        memcpy(saved_iv, in + inl - ivlen, ivlen);
-    if ((outl = afalg_do_cipher(ctx, out, in, inl)) < 1)
-        return outl;
-    memcpy(iv, enc ? out + inl - ivlen : saved_iv, ivlen);
-
-    return outl;
-}
-
 static void ctr_updateiv(unsigned char* iv, size_t ivlen, size_t nblocks)
 {
     do {
@@ -775,7 +756,7 @@ static void prepare_cipher_methods(void)
         blocksize = cipher_data[i].blocksize;
         switch (cipher_data[i].flags & EVP_CIPH_MODE) {
         case EVP_CIPH_CBC_MODE:
-            do_cipher = cbc_do_cipher;
+            do_cipher = afalg_do_cipher;
             break;
         case EVP_CIPH_CTR_MODE:
             do_cipher = ctr_do_cipher;
