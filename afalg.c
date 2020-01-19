@@ -16,6 +16,7 @@
  *  limitations under the License.
  *
  * Based on The OpenSSL Project Authors' devcrypto engine.
+ * Copyright 2017-2018 The OpenSSL Project Authors. All Rights Reserved.
  */
 
 #ifdef AFALG_ZERO_COPY
