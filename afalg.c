@@ -52,6 +52,10 @@ static size_t zc_maxsize, pagemask;
 #include <openssl/err.h>
 #include <openssl/engine.h>
 #include <openssl/objects.h>
+#ifndef AFALG_NO_FALLBACK
+# include <openssl/aes.h>
+# include <openssl/modes.h>
+#endif
 
 /* linux/crypto.h is not public, so we must define the type and masks here,
  * and hope they are still valid. */
@@ -78,6 +82,9 @@ static size_t zc_maxsize, pagemask;
 # define AFALG_DEFAULT_USE_SOFTDRIVERS AFALG_REJECT_SOFTWARE
 #endif
 static int use_softdrivers = AFALG_DEFAULT_USE_SOFTDRIVERS;
+#ifndef AFALG_NO_FALLBACK
+static int fb_threshold = -1;
+#endif
 
 /*
  * cipher/digest status & acceleration definitions
@@ -329,14 +336,88 @@ afalg_get_driver_name(const char *alg_name,
  *
  *****/
 
+struct cipher_data_st;
+
+#ifndef AFALG_NO_FALLBACK
+union fb_key {
+    double align;
+    AES_KEY aes;
+};
+#endif
+
 struct cipher_ctx {
     int bfd, sfd;
 #ifdef AFALG_ZERO_COPY
     int pipes[2];
 #endif
+#ifndef AFALG_NO_FALLBACK
+    union fb_key ks;
+    void (*fallback) (EVP_CIPHER_CTX *ctx, unsigned char *out,
+                      const unsigned char *in, size_t inl);
+    int (*fb_setkey) (union fb_key *ks, const unsigned char *key, int keylen,
+                      int enc);
+    int fb_threshold;
+#endif
+    int control_is_set;
+    const struct cipher_data_st *cipher_d;
     unsigned int blocksize, num;
     unsigned char partial[EVP_MAX_BLOCK_LENGTH];
 };
+
+#ifndef AFALG_NO_FALLBACK
+static void aes_cbc_fallback(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                             const unsigned char *in, size_t inl)
+{
+    struct cipher_ctx *cipher_ctx =
+        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+
+    AES_cbc_encrypt(in, out, inl, (const void *) &cipher_ctx->ks.aes,
+                    EVP_CIPHER_CTX_iv_noconst(ctx),
+                    EVP_CIPHER_CTX_encrypting(ctx));
+    cipher_ctx->control_is_set = 0;
+}
+
+static void aes_ctr_fallback(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                             const unsigned char *in, size_t inl)
+{
+    struct cipher_ctx *cipher_ctx =
+        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    static unsigned char ecount_buf[16] = { 0 };
+    static unsigned int num = 0;
+
+    CRYPTO_ctr128_encrypt(in, out, inl, (const void *) &cipher_ctx->ks.aes,
+                          EVP_CIPHER_CTX_iv_noconst(ctx), ecount_buf, &num,
+                          (block128_f) AES_encrypt);
+    cipher_ctx->control_is_set = 0;
+}
+
+static void aes_ecb_fallback(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                             const unsigned char *in, size_t inl)
+{
+    struct cipher_ctx *cipher_ctx =
+        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    size_t n;
+    int enc = EVP_CIPHER_CTX_encrypting(ctx);
+
+    for (n = 0; n < inl; n += 16)
+        AES_ecb_encrypt(in + n, out + n, &cipher_ctx->ks.aes, enc);
+}
+
+static int aes_ctr_setkey(union fb_key *ks, const unsigned char *key,
+                          int keylen, int enc)
+{
+        return AES_set_encrypt_key(key, keylen * 8, &ks->aes);
+}
+
+static int aes_setkey(union fb_key *ks, const unsigned char *key, int keylen,
+                      int enc)
+{
+    if (enc)
+        return AES_set_encrypt_key(key, keylen * 8, &ks->aes);
+    else
+        return AES_set_decrypt_key(key, keylen * 8, &ks->aes);
+}
+#endif
 
 static const struct cipher_data_st {
     int nid;
@@ -345,6 +426,13 @@ static const struct cipher_data_st {
     int ivlen;
     int flags;
     const char *name;
+#ifndef AFALG_NO_FALLBACK
+    void (*fallback) (EVP_CIPHER_CTX *ctx, unsigned char *out,
+                      const unsigned char *in, size_t inl);
+    int (*fb_setkey) (union fb_key *ks, const unsigned char *key, int keylen,
+                      int enc);
+    int fb_threshold;
+#endif
 } cipher_data[] = {
 #ifndef OPENSSL_NO_DES
     { NID_des_cbc, 8, 8, 8, EVP_CIPH_CBC_MODE, "cbc(des)" },
@@ -356,15 +444,51 @@ static const struct cipher_data_st {
 #ifndef OPENSSL_NO_CAST
     { NID_cast5_cbc, 8, 16, 8, EVP_CIPH_CBC_MODE, "cbc(cast5)" },
 #endif
-    { NID_aes_128_cbc, 16, 128 / 8, 16, EVP_CIPH_CBC_MODE, "cbc(aes)" },
-    { NID_aes_192_cbc, 16, 192 / 8, 16, EVP_CIPH_CBC_MODE, "cbc(aes)" },
-    { NID_aes_256_cbc, 16, 256 / 8, 16, EVP_CIPH_CBC_MODE, "cbc(aes)" },
-    { NID_aes_128_ctr, 16, 128 / 8, 16, EVP_CIPH_CTR_MODE, "ctr(aes)" },
-    { NID_aes_192_ctr, 16, 192 / 8, 16, EVP_CIPH_CTR_MODE, "ctr(aes)" },
-    { NID_aes_256_ctr, 16, 256 / 8, 16, EVP_CIPH_CTR_MODE, "ctr(aes)" },
-    { NID_aes_128_ecb, 16, 128 / 8, 0, EVP_CIPH_ECB_MODE, "ecb(aes)" },
-    { NID_aes_192_ecb, 16, 192 / 8, 0, EVP_CIPH_ECB_MODE, "ecb(aes)" },
-    { NID_aes_256_ecb, 16, 256 / 8, 0, EVP_CIPH_ECB_MODE, "ecb(aes)" },
+    { NID_aes_128_cbc, 16, 128 / 8, 16, EVP_CIPH_CBC_MODE, "cbc(aes)",
+#ifndef AFALG_NO_FALLBACK
+      aes_cbc_fallback, aes_setkey, 1536 //OK
+#endif
+    },
+    { NID_aes_192_cbc, 16, 192 / 8, 16, EVP_CIPH_CBC_MODE, "cbc(aes)",
+#ifndef AFALG_NO_FALLBACK
+      aes_cbc_fallback, aes_setkey, 1152 //OK
+#endif
+    },
+    { NID_aes_256_cbc, 16, 256 / 8, 16, EVP_CIPH_CBC_MODE, "cbc(aes)",
+#ifndef AFALG_NO_FALLBACK
+      aes_cbc_fallback, aes_setkey, 960 //OK
+#endif
+    },
+    { NID_aes_128_ctr, 16, 128 / 8, 16, EVP_CIPH_CTR_MODE, "ctr(aes)",
+#ifndef AFALG_NO_FALLBACK
+      aes_ctr_fallback, aes_ctr_setkey, 1360
+#endif
+    },
+    { NID_aes_192_ctr, 16, 192 / 8, 16, EVP_CIPH_CTR_MODE, "ctr(aes)",
+#ifndef AFALG_NO_FALLBACK
+      aes_ctr_fallback, aes_ctr_setkey, 1152
+#endif
+    },
+    { NID_aes_256_ctr, 16, 256 / 8, 16, EVP_CIPH_CTR_MODE, "ctr(aes)",
+#ifndef AFALG_NO_FALLBACK
+      aes_ctr_fallback, aes_ctr_setkey, 960
+#endif
+    },
+    { NID_aes_128_ecb, 16, 128 / 8, 0, EVP_CIPH_ECB_MODE, "ecb(aes)",
+#ifndef AFALG_NO_FALLBACK
+      aes_ecb_fallback, aes_setkey, 2048
+#endif
+    },
+    { NID_aes_192_ecb, 16, 192 / 8, 0, EVP_CIPH_ECB_MODE, "ecb(aes)",
+#ifndef AFALG_NO_FALLBACK
+      aes_ecb_fallback, aes_setkey, 1440
+#endif
+    },
+    { NID_aes_256_ecb, 16, 256 / 8, 0, EVP_CIPH_ECB_MODE, "ecb(aes)",
+#ifndef AFALG_NO_FALLBACK
+      aes_ecb_fallback, aes_setkey, 1152
+#endif
+    },
 #if 0
 /* Current camellia kernel module does not implement the skcipher
  * interface, necessary to work with AF_ALG */
@@ -418,24 +542,54 @@ static int afalg_set_key(int sfd, const void *key, int keylen)
     return 0;
 }
 
-static void afalg_set_op(struct cmsghdr *cmsg, unsigned int op)
+static int afalg_set_control(struct msghdr *msg, int op,
+                             const unsigned char *iv, unsigned int ivlen)
 {
+    size_t set_op_len = sizeof(op);
+    size_t set_iv_len;
+    struct cmsghdr *cmsg;
+    struct af_alg_iv *aiv;
+
+    if (!iv)
+        ivlen = 0;
+    set_iv_len = offsetof(struct af_alg_iv, iv) + ivlen;
+    msg->msg_controllen = CMSG_SPACE(set_op_len)
+                        + (ivlen > 0 ? CMSG_SPACE(set_iv_len) : 0);
+    msg->msg_control = OPENSSL_zalloc(msg->msg_controllen);
+    if (msg->msg_control == NULL) {
+        perror("afalg_set_control: OPENSSL_zalloc");
+        return 0;
+    }
+    cmsg = CMSG_FIRSTHDR(msg);
+    if (cmsg == NULL) {
+        fprintf(stderr, "%s: CMSG_FIRSTHDR error setting op.\n", __func__);
+        goto err;
+    }
     cmsg->cmsg_level = SOL_ALG;
     cmsg->cmsg_type = ALG_SET_OP;
     cmsg->cmsg_len = CMSG_LEN(sizeof(op));
     *(CMSG_DATA(cmsg)) = op;
-}
+    if (ivlen == 0)
+        return 1;
 
-static void afalg_set_iv(struct cmsghdr *cmsg, const unsigned char *iv, unsigned int ivlen)
-{
-    struct af_alg_iv *aiv;
-
+    cmsg = CMSG_NXTHDR(msg, cmsg);
+    if (cmsg == NULL) {
+        fprintf(stderr, "%s: CMSG_NXTHDR error setting iv.\n", __func__);
+        goto err;
+    }
     cmsg->cmsg_level = SOL_ALG;
     cmsg->cmsg_type = ALG_SET_IV;
     cmsg->cmsg_len = CMSG_LEN(offsetof(struct af_alg_iv, iv) + ivlen);
     aiv = (void *)CMSG_DATA(cmsg);
     aiv->ivlen = ivlen;
     memcpy(aiv->iv, iv, ivlen);
+    return 1;
+
+err:
+    free(msg->msg_control);
+    msg->msg_control = NULL;
+    msg->msg_controllen = 0;
+    return 0;
 }
 
 static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
@@ -446,18 +600,11 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
     const struct cipher_data_st *cipher_d =
         get_cipher_data(EVP_CIPHER_CTX_nid(ctx));
     int keylen;
-    struct msghdr msg = { 0 };
-    struct cmsghdr *cmsg;
-    int op = enc ? ALG_OP_ENCRYPT : ALG_OP_DECRYPT;
-    size_t set_op_len = sizeof(op);
-    size_t ivlen = (iv == NULL) ? 0 : EVP_CIPHER_CTX_iv_length(ctx);
-    size_t set_iv_len = offsetof(struct af_alg_iv, iv) + ivlen;
-    size_t controllen = CMSG_SPACE(set_op_len)
-                        + (ivlen > 0 ? CMSG_SPACE(set_iv_len) : 0);
+    int mode = EVP_CIPHER_CTX_mode(ctx);
     __u32 afalg_mask;
 
     if (cipher_ctx->bfd == -1) {
-        if (EVP_CIPHER_CTX_mode(ctx) == EVP_CIPH_CTR_MODE)
+        if (mode == EVP_CIPH_CTR_MODE)
             cipher_ctx->blocksize = cipher_d->blocksize;
         if (use_softdrivers == AFALG_REQUIRE_ACCELERATED)
             afalg_mask = CRYPTO_ALG_KERN_DRIVER_ONLY;
@@ -473,33 +620,29 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
         close(cipher_ctx->sfd);
         cipher_ctx->sfd = -1;
     }
-    if (key != NULL
-        && (keylen = EVP_CIPHER_CTX_key_length(ctx)) > 0
-        && !afalg_set_key(cipher_ctx->bfd, key, keylen)) {
-        fprintf(stderr, "cipher_init: Error setting key.\n");
-        goto err;
+    if (key != NULL) {
+        if ((keylen = EVP_CIPHER_CTX_key_length(ctx)) > 0
+            && !afalg_set_key(cipher_ctx->bfd, key, keylen)) {
+            fprintf(stderr, "cipher_init: Error setting key.\n");
+            goto err;
+        }
+#ifndef AFALG_NO_FALLBACK
+        if (cipher_d->fb_setkey && cipher_d->fallback) {
+            if (cipher_d->fb_setkey(&cipher_ctx->ks, key, keylen, enc)) {
+                fprintf(stderr, "cipher_init: Warning: Cannot set fallback key."
+                                " Fallback will not be used!\n");
+            } else {
+                cipher_ctx->fallback = cipher_d->fallback;
+                if (fb_threshold == -1)
+                    cipher_ctx->fb_threshold = cipher_d->fb_threshold;
+                else
+                    cipher_ctx->fb_threshold = fb_threshold;
+            }
+        }
+#endif
     }
     if ((cipher_ctx->sfd = accept(cipher_ctx->bfd, NULL, 0)) < 0) {
         perror("cipher_init: accept");
-        goto err;
-    }
-    if ((msg.msg_control = OPENSSL_zalloc(controllen)) == NULL) {
-        perror("cipher_init: OPENSSL_zalloc");
-        goto err_close;
-    }
-    msg.msg_controllen = controllen;
-    if ((cmsg = CMSG_FIRSTHDR(&msg)) == NULL) {
-        fprintf(stderr, "cipher_init: CMSG_FIRSTHDR error setting op.\n");
-        goto err;
-    }
-    afalg_set_op(cmsg, op);
-    if (ivlen > 0) {
-        if ((cmsg = CMSG_NXTHDR(&msg, cmsg)) == NULL)
-            goto err;
-        afalg_set_iv(cmsg, iv, ivlen);
-    }
-    if (sendmsg(cipher_ctx->sfd, &msg, 0) < 0) {
-        perror("cipher_init: sendmsg");
         goto err;
     }
 #ifdef AFALG_ZERO_COPY
@@ -508,11 +651,10 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
         goto err;
     }
 #endif
+    cipher_ctx->cipher_d = cipher_d;
     return 1;
 
 err:
-    free(msg.msg_control);
-err_close:
     close(cipher_ctx->bfd);
     if (cipher_ctx->sfd >= 0) {
         close(cipher_ctx->sfd);
@@ -526,70 +668,124 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 {
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
-    ssize_t ret = -1;
-#ifdef AFALG_ZERO_COPY
+    struct msghdr msg = { 0 };
     struct iovec iov;
-    int use_zc = (inl <= zc_maxsize) && (((size_t)in & pagemask) == 0);
+    ssize_t res = -1;
+    int ret = 0;
+    int op = EVP_CIPHER_CTX_encrypting(ctx) ? ALG_OP_ENCRYPT : ALG_OP_DECRYPT;
+    int ivlen = EVP_CIPHER_CTX_iv_length(ctx);
+    unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
 
-    if (use_zc) {
-        iov.iov_base = (void *)in;
-	iov.iov_len = inl;
-        ret = vmsplice(cipher_ctx->pipes[1], &iov, 1,
+#ifndef AFALG_NO_FALLBACK
+    if (inl < cipher_ctx->fb_threshold) {
+        cipher_ctx->fallback(ctx, out, in, inl);
+        return 1;
+    }
+#endif
+    if (!cipher_ctx->control_is_set) {
+        afalg_set_control(&msg, op, iv, ivlen);
+        cipher_ctx->control_is_set = 1;
+    }
+    iov.iov_base = (void *)in;
+    iov.iov_len = inl;
+#ifdef AFALG_ZERO_COPY
+    if (inl <= zc_maxsize && ((size_t)in & pagemask) == 0) {
+        if (msg.msg_control && sendmsg(cipher_ctx->sfd, &msg, 0) < 0) {
+            perror ("afalg_do_cipher: sendmsg");
+            goto out;
+        }
+        res = vmsplice(cipher_ctx->pipes[1], &iov, 1,
                        SPLICE_F_GIFT & SPLICE_F_MORE);
-        if (ret < 0) {
+        if (res < 0) {
             perror("afalg_do_cipher: vmsplice");
-            goto err;
-        } else if (ret != (ssize_t) inl) {
+            goto out;
+        } else if (res != (ssize_t) inl) {
             fprintf(stderr,
                     "afalg_do_cipher: vmsplice: sent %zd bytes != len %zd\n",
-                    ret, inl);
-            goto err;
+                    res, inl);
+            goto out;
         }
-        ret = splice(cipher_ctx->pipes[0], NULL, cipher_ctx->sfd, NULL, inl, 0);
-        if (ret < 0) {
+        res = splice(cipher_ctx->pipes[0], NULL, cipher_ctx->sfd, NULL, inl, 0);
+        if (res < 0) {
             perror("afalg_do_cipher: splice");
-            goto err;
-        } else if (ret != (ssize_t) inl) {
+            goto out;
+        } else if (res != (ssize_t) inl) {
             fprintf(stderr,
                     "afalg_do_cipher: splice: spliced %zd bytes != len %zd\n",
-                    ret, inl);
-            goto err;
+                    res, inl);
+            goto out;
         }
     } else
 #endif
     {
-        if ((ret = send(cipher_ctx->sfd, in, inl, MSG_MORE)) < 0) {
-            perror("afalg_do_cipher: send");
-            goto err;
-        } else if (ret != (ssize_t) inl) {
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        if ((res = sendmsg(cipher_ctx->sfd, &msg, 0)) < 0) {
+            perror("afalg_do_cipher: sendmsg");
+            goto out;
+        } else if (res != (ssize_t) inl) {
             fprintf(stderr, "afalg_do_cipher: sent %zd bytes != len %zd\n",
-                    ret, inl);
-            goto err;
+                    res, inl);
+            goto out;
         }
     }
-    if ((ret = read(cipher_ctx->sfd, out, inl)) == (ssize_t) inl)
-        return 1;
-
-    fprintf(stderr, "afalg_do_cipher: read %zd bytes != len %zd\n",
-            ret, inl);
-
-err:
-    return 0;
+    if ((res = read(cipher_ctx->sfd, out, inl)) == (ssize_t) inl)
+        ret = 1;
+    else
+        fprintf(stderr, "afalg_do_cipher: read %zd bytes != len %zd\n",
+                res, inl);
+out:
+    if (msg.msg_control)
+        OPENSSL_free(msg.msg_control);
+    return ret;
 }
 
-static void ctr_updateiv(unsigned char* iv, size_t ivlen, size_t nblocks)
+static int cbc_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                         const unsigned char *in, size_t inl)
 {
-#ifndef AFALG_KERNEL_UPDATES_IV
-    do {
-        ivlen--;
-        nblocks += iv[ivlen];
-        iv[ivlen] = (uint8_t) nblocks;
-        nblocks >>= 8;
-    } while (ivlen);
+#ifndef AFALG_NO_FALLBACK
+    int enc = EVP_CIPHER_CTX_encrypting(ctx);
+    size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx);
+    unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
+    unsigned char saved_iv[EVP_MAX_IV_LENGTH];
+    int ret;
+
+    assert(inl >= ivlen);
+    if (!enc)
+        memcpy(saved_iv, in + inl - ivlen, ivlen);
+    if ((ret = afalg_do_cipher(ctx, out, in, inl)))
+        memcpy(iv, enc ? out + inl - ivlen : saved_iv, ivlen);
+    return ret;
 #else
-    (void)iv;
-    (void)ivlen;
+    return afalg_do_cipher(ctx, out, in, inl);
+#endif
+}
+
+static int ctr_do_blocks(EVP_CIPHER_CTX *ctx, struct cipher_ctx *cipher_ctx,
+                         unsigned char *out, const unsigned char *in,
+                         size_t inl, size_t nblocks)
+{
+#if !defined(AFALG_KERNEL_UPDATES_CTR_IV) || !defined(AFALG_NO_FALLBACK)
+    int ret;
+    size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx);
+    unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
+
+    ret = afalg_do_cipher(ctx, out, in, inl);
+    /* Update IV only if AFALG was actually used */
+    if (ret && cipher_ctx->control_is_set)
+        do {
+            ivlen--;
+            nblocks += iv[ivlen];
+            iv[ivlen] = (uint8_t) nblocks;
+            nblocks >>= 8;
+        } while (ivlen);
+    cipher_ctx->control_is_set = 0;
+
+    return ret;
+#else
+    (void)cipher_ctx;
     (void)nblocks;
+    return afalg_do_cipher(ctx, out, in, inl);
 #endif
 }
 
@@ -598,8 +794,7 @@ static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 {
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
-    size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx), nblocks, len;
-    unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
+    size_t nblocks, len;
 
     /* handle initial partial block */
     while (cipher_ctx->num && inl) {
@@ -610,23 +805,21 @@ static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 
     /* process full blocks */
     if (inl > (unsigned int) cipher_ctx->blocksize) {
-      nblocks = inl/cipher_ctx->blocksize;
-      len = nblocks * cipher_ctx->blocksize;
-      if (afalg_do_cipher(ctx, out, in, len) < 1)
-          return 0;
-      ctr_updateiv(iv, ivlen, nblocks);
-      inl -= len;
-      out += len;
-      in += len;
+        nblocks = inl/cipher_ctx->blocksize;
+        len = nblocks * cipher_ctx->blocksize;
+        if (!ctr_do_blocks(ctx, cipher_ctx, out, in, len, nblocks))
+            return 0;
+        inl -= len;
+        out += len;
+        in += len;
     }
 
     /* process final partial block */
     if (inl) {
         memset(cipher_ctx->partial, 0, cipher_ctx->blocksize);
-        if (afalg_do_cipher(ctx, cipher_ctx->partial, cipher_ctx->partial,
-                            cipher_ctx->blocksize) < 1)
+        if (!ctr_do_blocks(ctx, cipher_ctx, cipher_ctx->partial,
+                             cipher_ctx->partial, cipher_ctx->blocksize, 1))
             return 0;
-        ctr_updateiv(iv, ivlen, 1);
         while (inl--) {
             out[cipher_ctx->num] = in[cipher_ctx->num]
                 ^ cipher_ctx->partial[cipher_ctx->num];
@@ -654,14 +847,15 @@ static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
                         (EVP_CIPHER_CTX *)p2);
 
         to_cipher_ctx->bfd = to_cipher_ctx->sfd = -1;
+        to_cipher_ctx->control_is_set = 0;
 #ifdef AFALG_ZERO_COPY
         if (pipe(to_cipher_ctx->pipes) != 0)
             return 0;
 #endif
         if ((to_cipher_ctx->bfd = dup(cipher_ctx->bfd)) == -1) {
-	    perror(__func__);
-	    return 0;
-	}
+            perror(__func__);
+            return 0;
+        }
         if ((to_cipher_ctx->sfd = accept(to_cipher_ctx->bfd, NULL, 0)) != -1)
             return 1;
         SYSerr(SYS_F_ACCEPT, errno);
@@ -765,7 +959,7 @@ static void prepare_cipher_methods(void)
         blocksize = cipher_data[i].blocksize;
         switch (cipher_data[i].flags & EVP_CIPH_MODE) {
         case EVP_CIPH_CBC_MODE:
-            do_cipher = afalg_do_cipher;
+            do_cipher = cbc_do_cipher;
             break;
         case EVP_CIPH_CTR_MODE:
             do_cipher = ctr_do_cipher;
@@ -936,6 +1130,12 @@ static void dump_cipher_info(void)
             fprintf(stderr, " (software)");
         else
             fprintf(stderr, " (acceleration status unknown)");
+#ifndef AFALG_NO_FALLBACK
+        if (cipher_data[i].fallback) {
+            fprintf(stderr, ", sw fallback available, default threshold=%d",
+                    cipher_data[i].fb_threshold);
+        }
+#endif
         if (cipher_driver_info[i].status == AFALG_STATUS_FAILURE)
             fprintf (stderr, ". Cipher setup failed.");
         fprintf (stderr, "\n");
@@ -1374,7 +1574,10 @@ enum {
 #ifdef AFALG_DIGESTS
     AFALG_CMD_DIGESTS,
 #endif
-    AFALG_CMD_DUMP_INFO,
+#ifndef AFALG_NO_FALLBACK
+    AFALG_CMD_AES_THRESHOLD,
+#endif
+    AFALG_CMD_DUMP_INFO
 };
 
 /* Helper macros for CPP string composition */
@@ -1404,6 +1607,17 @@ static const ENGINE_CMD_DEFN afalg_cmds[] = {
      "DIGESTS",
      "either ALL, NONE, or a comma-separated list of digests to enable [default=NONE]",
      ENGINE_CMD_FLAG_STRING},
+#endif
+
+#ifndef AFALG_NO_FALLBACK
+   {AFALG_CMD_AES_THRESHOLD,
+     "AES_SOFT_THRESHOLD",
+     "set the mininum request length to use AF_ALG drivers for AES ciphers;"
+     " smaller requests are processed by software. Set to -1 to use"
+     " predetermined values that vary by mode and key size (use DUMP_INFO to"
+     " see them). The default values are variable, but any value entered here"
+     " applies to all ciphers [default=-1]",
+     ENGINE_CMD_FLAG_NUMERIC},
 #endif
 
    {AFALG_CMD_DUMP_INFO,
@@ -1479,6 +1693,14 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
             OPENSSL_free(new_list);
         }
         rebuild_known_digest_nids(e);
+        return 1;
+#endif
+
+#ifndef AFALG_NO_FALLBACK
+    case AFALG_CMD_AES_THRESHOLD:
+        if (i < -1)
+            return 0;
+        fb_threshold = i;
         return 1;
 #endif
 

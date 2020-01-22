@@ -56,6 +56,11 @@ if (DIGESTS)
 	add_definitions(-DAFALG_DIGESTS)
 endif()
 
+option(FALLBACK "Fallback to using software to perform smaller cipher operations" ON)
+if (NOT FALLBACK)
+	add_definitions(-DAFALG_NO_FALLBACK)
+endif()
+
 add_library(afalg_engine MODULE afalg.c)
 set_target_properties(afalg_engine PROPERTIES PREFIX "" OUTPUT_NAME "afalg")
 target_link_libraries(afalg_engine ${OPENSSL_CRYPTO_LIBRARY})
