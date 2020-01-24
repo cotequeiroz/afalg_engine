@@ -152,7 +152,6 @@ static int prepare_afalg_alg_list(void)
 {
     int ret = -EFAULT;
 
-    fprintf(stderr, "Entering %s:\n", __func__);
     /* NETLINK_CRYPTO specific */
     void *buf = NULL;
     struct nlmsghdr *res_n;
@@ -1467,7 +1466,6 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
     case AFALG_CMD_DUMP_INFO:
 #ifndef AFALG_NO_CRYPTOUSER
         prepare_afalg_alg_list();
-        fprintf(stderr, "afalg_alg_list_count=%d\n", afalg_alg_list_count);
         if (afalg_alg_list_count < 0)
             fprintf (stderr, "Could not get driver info through the netlink"
                      " interface.\nIs the 'crypto_user' module loaded?\n");
