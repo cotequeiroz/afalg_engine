@@ -943,6 +943,7 @@ static void dump_cipher_info(void)
     fprintf(stderr, "\n");
 }
 
+#ifdef AFALG_DIGESTS
 /******************************************************************************
  *
  * Digests
@@ -1359,16 +1360,22 @@ static void dump_digest_info(void)
     fprintf(stderr, "\n");
 }
 
+#endif /* AFALG_DIGESTS */
+
 /******************************************************************************
  *
  * CONTROL COMMANDS
  *
  *****/
 
-#define AFALG_CMD_USE_SOFTDRIVERS  ENGINE_CMD_BASE
-#define AFALG_CMD_CIPHERS         (ENGINE_CMD_BASE + 1)
-#define AFALG_CMD_DIGESTS         (ENGINE_CMD_BASE + 2)
-#define AFALG_CMD_DUMP_INFO       (ENGINE_CMD_BASE + 3)
+enum {
+    AFALG_CMD_USE_SOFTDRIVERS = ENGINE_CMD_BASE,
+    AFALG_CMD_CIPHERS,
+#ifdef AFALG_DIGESTS
+    AFALG_CMD_DIGESTS,
+#endif
+    AFALG_CMD_DUMP_INFO,
+};
 
 /* Helper macros for CPP string composition */
 #ifndef OPENSSL_MSTR
@@ -1392,10 +1399,12 @@ static const ENGINE_CMD_DEFN afalg_cmds[] = {
      "either ALL, NONE, NO_ECB (all except ECB-mode) or a comma-separated list of ciphers to enable [default=NO_ECB]",
      ENGINE_CMD_FLAG_STRING},
 
+#ifdef AFALG_DIGESTS
    {AFALG_CMD_DIGESTS,
      "DIGESTS",
      "either ALL, NONE, or a comma-separated list of digests to enable [default=NONE]",
      ENGINE_CMD_FLAG_STRING},
+#endif
 
    {AFALG_CMD_DUMP_INFO,
      "DUMP_INFO",
@@ -1425,7 +1434,9 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
         if (use_softdrivers == i)
             return 1;
         use_softdrivers = i;
+#ifdef AFALG_DIGESTS
         rebuild_known_digest_nids(e);
+#endif
         rebuild_known_cipher_nids(e);
         return 1;
 
@@ -1450,6 +1461,7 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
         rebuild_known_cipher_nids(e);
         return 1;
 
+#ifdef AFALG_DIGESTS
     case AFALG_CMD_DIGESTS:
         if (p == NULL)
             return 1;
@@ -1468,6 +1480,7 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
         }
         rebuild_known_digest_nids(e);
         return 1;
+#endif
 
     case AFALG_CMD_DUMP_INFO:
 #ifndef AFALG_NO_CRYPTOUSER
@@ -1477,7 +1490,9 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
                      " interface.\nIs the 'crypto_user' module loaded?\n");
 #endif
         dump_cipher_info();
+#ifdef AFALG_DIGESTS
         dump_digest_info();
+#endif
         return 1;
 
     default:
@@ -1496,13 +1511,17 @@ static int afalg_unload(ENGINE *e)
 {
     (void)e;
     destroy_all_cipher_methods();
+#ifdef AFALG_DIGESTS
     destroy_all_digest_methods();
+#endif
 
     return 1;
 }
 
 
 static int bind_afalg(ENGINE *e) {
+    int ret;
+
     if (!ENGINE_set_id(e, engine_afalg_id)
         || !ENGINE_set_name(e, "AF_ALG engine")
         || !ENGINE_set_destroy_function(e, afalg_unload)
@@ -1515,12 +1534,17 @@ static int bind_afalg(ENGINE *e) {
     zc_maxsize = sysconf(_SC_PAGESIZE) * 16;
 #endif
     prepare_cipher_methods();
+#ifdef AFALG_DIGESTS
     prepare_digest_methods();
+#endif
     OPENSSL_free(afalg_alg_list);
     if (afalg_alg_list_count > 0)
         afalg_alg_list_count = 0;
-    return ENGINE_set_ciphers(e, afalg_ciphers) &&
-        ENGINE_set_digests(e, afalg_digests);
+    ret = ENGINE_set_ciphers(e, afalg_ciphers);
+#ifdef AFALG_DIGESTS
+    ret = ret && ENGINE_set_digests(e, afalg_digests);
+#endif
+    return ret;
 }
 
 static int test_afalg_socket(void)

@@ -51,6 +51,11 @@ if (NOT UPDATE_CTR_IV)
 	add_definitions(-DAFALG_KERNEL_UPDATES_CTR_IV)
 endif()
 
+option(DIGESTS "Build support for message digest operations, which are slow and troublesome, so this is off by default" OFF)
+if (DIGESTS)
+	add_definitions(-DAFALG_DIGESTS)
+endif()
+
 add_library(afalg_engine MODULE afalg.c)
 set_target_properties(afalg_engine PROPERTIES PREFIX "" OUTPUT_NAME "afalg")
 target_link_libraries(afalg_engine ${OPENSSL_CRYPTO_LIBRARY})
