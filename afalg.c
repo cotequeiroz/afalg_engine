@@ -658,8 +658,11 @@ static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
         if (pipe(to_cipher_ctx->pipes) != 0)
             return 0;
 #endif
-        if ((to_cipher_ctx->bfd = accept(cipher_ctx->bfd, NULL, 0)) != -1
-            && (to_cipher_ctx->sfd = accept(to_cipher_ctx->bfd, NULL, 0)) != -1)
+        if ((to_cipher_ctx->bfd = dup(cipher_ctx->bfd)) == -1) {
+	    perror(__func__);
+	    return 0;
+	}
+        if ((to_cipher_ctx->sfd = accept(to_cipher_ctx->bfd, NULL, 0)) != -1)
             return 1;
         SYSerr(SYS_F_ACCEPT, errno);
 #ifdef AFALG_ZERO_COPY
@@ -1119,9 +1122,12 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
     if (pipe(digest_to->pipes) != 0)
         return 0;
 #endif
-    digest_to->sfd = digest_to->bfd = -1;
-    if ((digest_to->bfd = accept(digest_from->bfd, NULL, 0)) != -1
-        && (digest_to->sfd = accept(digest_from->sfd, NULL, 0)) != -1)
+    digest_to->sfd = -1;
+    if ((digest_to->bfd = dup(digest_from->bfd))== -1) {
+        perror(__func__);
+        return 0;
+    }
+    if ((digest_to->sfd = accept(digest_from->sfd, NULL, 0)) != -1)
         return 1;
 
     SYSerr(SYS_F_ACCEPT, errno);
