@@ -79,7 +79,7 @@ static size_t zc_maxsize, pagemask;
 #endif
 static int use_softdrivers = AFALG_DEFAULT_USE_SOFTDRIVERS;
 #ifndef AFALG_NO_FALLBACK
-static int fb_threshold = -1;
+static int cipher_fb_threshold = -1;
 #endif
 
 /*
@@ -591,10 +591,10 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
                                 enc)) {
                 fprintf(stderr, "cipher_init: Warning: Cannot set fallback key."
                                 " Fallback will not be used!\n");
-            } else if (fb_threshold == -1) {
+            } else if (cipher_fb_threshold == -1) {
                     cipher_ctx->fb_threshold = cipher_d->fb_threshold;
             } else {
-                    cipher_ctx->fb_threshold = fb_threshold;
+                    cipher_ctx->fb_threshold = cipher_fb_threshold;
             }
         }
 #endif
@@ -1178,6 +1178,11 @@ struct digest_ctx {
 #ifdef AFALG_ZERO_COPY
     int pipes[2];
 #endif
+#ifndef AFALG_NO_FALLBACK
+    const EVP_MD_CTX *fallback;
+    int fb_threshold;
+    unsigned char res[EVP_MAX_MD_SIZE];
+#endif
     const struct digest_data_st *digest_d;
     size_t inp_len;
     void *inp_data;
@@ -1188,18 +1193,50 @@ static const struct digest_data_st {
     int blocksize;
     int digestlen;
     char *name;
+#ifndef AFALG_NO_FALLBACK
+    const EVP_MD *((*fallback) (void));
+    int fb_threshold;
+#endif
 } digest_data[] = {
 #ifndef OPENSSL_NO_MD5
-    { NID_md5, /* MD5_CBLOCK */ 64, 16, "md5" },
+    { NID_md5, /* MD5_CBLOCK */ 64, 16, "md5",
+#ifndef AFALG_NO_FALLBACK
+      EVP_md5, 16384
 #endif
-    { NID_sha1, SHA_CBLOCK, 20, "sha1" },
+    },
+#endif
+    { NID_sha1, SHA_CBLOCK, 20, "sha1",
+#ifndef AFALG_NO_FALLBACK
+      EVP_sha1, 16384
+#endif
+    },
 #ifndef OPENSSL_NO_RMD160
-    { NID_ripemd160, /* RIPEMD160_CBLOCK */ 64, 20, "rmd160" },
+    { NID_ripemd160, /* RIPEMD160_CBLOCK */ 64, 20, "rmd160",
+#ifndef AFALG_NO_FALLBACK
+      EVP_ripemd160, 16384
 #endif
-    { NID_sha224, SHA256_CBLOCK, 224 / 8, "sha224" },
-    { NID_sha256, SHA256_CBLOCK, 256 / 8, "sha256" },
-    { NID_sha384, SHA512_CBLOCK, 384 / 8, "sha384" },
-    { NID_sha512, SHA512_CBLOCK, 512 / 8, "sha512" },
+    },
+#endif
+    { NID_sha224, SHA256_CBLOCK, 224 / 8, "sha224",
+#ifndef AFALG_NO_FALLBACK
+      EVP_sha224, 16384
+#endif
+    },
+    { NID_sha256, SHA256_CBLOCK, 256 / 8, "sha256",
+#ifndef AFALG_NO_FALLBACK
+      EVP_sha256, 16384
+#endif
+    },
+    { NID_sha384, SHA512_CBLOCK, 384 / 8, "sha384",
+#ifndef AFALG_NO_FALLBACK
+      EVP_sha384, 16384
+#endif
+    },
+    { NID_sha512, SHA512_CBLOCK, 512 / 8, "sha512",
+#ifndef AFALG_NO_FALLBACK
+      EVP_sha512, 16384
+#endif
+    },
 };
 
 static size_t find_digest_data_index(int nid)
@@ -1228,18 +1265,45 @@ static size_t get_digest_data_index(int nid)
     return -1;
 }
 
-static const struct digest_data_st *get_digest_data(int nid)
+#ifndef AFALG_NO_FALLBACK
+static EVP_MD_CTX *digest_fb_ctx[OSSL_NELEM(digest_data)] = { NULL, };
+static int digest_fb_threshold = -1;
+
+static int digest_use_fb(const EVP_MD_CTX *fallback, const void *data,
+                         size_t len, unsigned char *res)
 {
-    return &digest_data[get_digest_data_index(nid)];
+    EVP_MD_CTX *new_ctx = EVP_MD_CTX_new();
+    int ret;
+
+    if (!new_ctx)
+        return 0;
+
+    ret = EVP_MD_CTX_copy(new_ctx, fallback)
+        && EVP_DigestUpdate(new_ctx, data, len)
+        && EVP_DigestFinal_ex(new_ctx, res, NULL);
+
+    EVP_MD_CTX_free(new_ctx);
+    return ret;
 }
+#endif
 
 static int digest_init(EVP_MD_CTX *ctx)
 {
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
+    int i = get_digest_data_index(EVP_MD_CTX_type(ctx));
 
     digest_ctx->sfd = -1;
-    digest_ctx->digest_d = get_digest_data(EVP_MD_CTX_type(ctx));
+    digest_ctx->digest_d = &digest_data[i];
+#ifndef AFALG_NO_FALLBACK
+    if (digest_fb_ctx[i]) {
+        digest_ctx->fallback = digest_fb_ctx[i];
+        if (digest_fb_threshold == -1)
+            digest_ctx->fb_threshold = digest_data[i].fb_threshold;
+        else
+            digest_ctx->fb_threshold = digest_fb_threshold;
+    }
+#endif
     return 1;
 }
 
@@ -1247,9 +1311,8 @@ static int digest_get_sfd(EVP_MD_CTX *ctx)
 {
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
-    const struct digest_data_st *digest_d =
-        get_digest_data(EVP_MD_CTX_type(ctx));
     __u32 afalg_mask;
+    const struct digest_data_st *digest_d = digest_ctx->digest_d;
 
     digest_ctx->sfd = -1;
     if (use_softdrivers == AFALG_REQUIRE_ACCELERATED)
@@ -1288,6 +1351,12 @@ static int afalg_do_digest(EVP_MD_CTX *ctx, const void *data, size_t len,
 #ifdef AFALG_ZERO_COPY
     struct iovec iov;
     int use_zc = (len <= zc_maxsize) && (((size_t)data & pagemask) == 0);
+#endif
+#ifndef AFALG_NO_FALLBACK
+    if (digest_ctx->sfd == -1 && digest_ctx->fallback && !more
+        && len < digest_ctx->fb_threshold
+        && digest_use_fb(digest_ctx->fallback, data, len, digest_ctx->res))
+           return 1;
 #endif
     if (digest_ctx->sfd == -1 && !digest_get_sfd(ctx))
         return 0;
@@ -1361,8 +1430,17 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
 
     if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)
         || afalg_do_digest(ctx, digest_ctx->inp_data,
-                           digest_ctx->inp_len, 0))
-        ret = recv(digest_ctx->sfd, md, len, 0) == len;
+                           digest_ctx->inp_len, 0)) {
+        if (digest_ctx->sfd != -1) {
+            ret = recv(digest_ctx->sfd, md, len, 0) == len;
+        } else {
+#ifndef AFALG_NO_FALLBACK
+            memcpy(md, digest_ctx->res, len);
+            ret = 1;
+#endif
+        }
+    }
+
 out:
     OPENSSL_free(digest_ctx->inp_data);
     digest_ctx->inp_data = NULL;
@@ -1444,6 +1522,18 @@ static EVP_MD *known_digest_methods[OSSL_NELEM(digest_data)] = { NULL, };
 static int selected_digests[OSSL_NELEM(digest_data)];
 static struct driver_info_st digest_driver_info[OSSL_NELEM(digest_data)];
 
+#ifndef AFALG_NO_FALLBACK
+static EVP_MD_CTX *get_digest_fb_ctx(const EVP_MD *type)
+{
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+
+    if (!ctx || EVP_DigestInit_ex(ctx, type, NULL))
+        return ctx;
+    EVP_MD_CTX_free(ctx);
+    return NULL;
+}
+#endif
+
 static int afalg_test_digest(size_t digest_data_index)
 {
     return (digest_driver_info[digest_data_index].status == AFALG_STATUS_USABLE
@@ -1514,6 +1604,10 @@ static void prepare_digest_methods(void)
             EVP_MD_meth_free(known_digest_methods[i]);
             known_digest_methods[i] = NULL;
         } else {
+#ifndef AFALG_NO_FALLBACK
+            if (digest_data[i].fallback)
+                digest_fb_ctx[i] = get_digest_fb_ctx(digest_data[i].fallback());
+#endif
             digest_driver_info[i].status = AFALG_STATUS_USABLE;
         }
         if (afalg_test_digest(i))
@@ -1649,6 +1743,9 @@ enum {
 #endif
 #ifndef AFALG_NO_FALLBACK
     AFALG_CMD_CIPHER_THRESHOLD,
+# ifdef AFALG_DIGESTS
+    AFALG_CMD_MD_THRESHOLD,
+# endif
 #endif
     AFALG_CMD_DUMP_INFO
 };
@@ -1691,6 +1788,13 @@ static const ENGINE_CMD_DEFN afalg_cmds[] = {
      " see them). The default values are variable, but any value entered here"
      " applies to all ciphers [default=-1]",
      ENGINE_CMD_FLAG_NUMERIC},
+# ifdef AFALG_DIGESTS
+   {AFALG_CMD_MD_THRESHOLD,
+     "MD_SOFT_THRESHOLD",
+     "set the mininum request length to use AF_ALG drivers for Message Digests;"
+     " smaller requests are processed by software [default=16384]",
+     ENGINE_CMD_FLAG_NUMERIC},
+# endif
 #endif
 
    {AFALG_CMD_DUMP_INFO,
@@ -1773,8 +1877,16 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
     case AFALG_CMD_CIPHER_THRESHOLD:
         if (i < -1)
             return 0;
-        fb_threshold = i;
+        cipher_fb_threshold = i;
         return 1;
+
+# ifdef AFALG_DIGESTS
+    case AFALG_CMD_MD_THRESHOLD:
+        if (i < 0)
+            return 0;
+        digest_fb_threshold = i;
+        return 1;
+# endif
 #endif
 
     case AFALG_CMD_DUMP_INFO:
