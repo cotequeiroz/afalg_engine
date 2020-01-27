@@ -292,6 +292,7 @@ out:
 }
 #endif
 
+#ifndef AFALG_NO_CRYPTOUSER
 static const char *
 afalg_get_driver_name(const char *alg_name,
                       enum afalg_accelerated_t expected_accel)
@@ -310,7 +311,7 @@ afalg_get_driver_name(const char *alg_name,
             accel = AFALG_ACCELERATED;
         else
             accel = AFALG_NOT_ACCELERATED;
-        if (found && priority == afalg_alg_list[i].priority
+        if ((found && priority == afalg_alg_list[i].priority)
             || accel != expected_accel) {
             driver_name = "**unreliable info**";
         } else {
@@ -321,6 +322,7 @@ afalg_get_driver_name(const char *alg_name,
     }
     return driver_name;
 }
+#endif
 
 /******************************************************************************
  *
@@ -898,7 +900,10 @@ static int afalg_select_cipher_cb(const char *str, int len, void *usr)
 static void dump_cipher_info(void)
 {
     size_t i;
-    const char *evp_name, *driver_name;
+    const char *evp_name;
+#ifndef AFALG_NO_CRYPTOUSER
+    const char *driver_name;
+#endif
 
     fprintf (stderr, "Information about ciphers supported by the AF_ALG"
              " engine:\n");
@@ -1308,7 +1313,10 @@ static int afalg_select_digest_cb(const char *str, int len, void *usr)
 static void dump_digest_info(void)
 {
     size_t i;
-    const char *evp_name, *driver_name;
+    const char *evp_name;
+#ifndef AFALG_NO_CRYPTOUSER
+    const char *driver_name;
+#endif
 
     fprintf (stderr, "Information about digests supported by the AF_ALG"
              " engine:\n");
