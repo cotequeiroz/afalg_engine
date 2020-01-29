@@ -37,6 +37,7 @@ static size_t zc_maxsize, pagemask;
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <assert.h>
+#include <asm/byteorder.h>
 #include <asm/types.h>
 #ifndef AFALG_NO_CRYPTOUSER
 # include <linux/cryptouser.h>
@@ -728,6 +729,22 @@ static int cbc_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 #endif
 }
 
+#if !defined(AFALG_KERNEL_UPDATES_CTR_IV) || !defined(AFALG_NO_FALLBACK)
+static void ctr_update_iv(unsigned char *iv, size_t ivlen, __u64 nblocks)
+{
+    __be64 *a = (__be64 *)(iv + ivlen);
+    __u64 b;
+
+    for (; ivlen >= 8; ivlen -= 8) {
+        b = nblocks + __be64_to_cpu(*--a);
+        *a = __cpu_to_be64(b);
+        if (nblocks < b)
+            return;
+        nblocks = 1;
+    }
+}
+#endif
+
 static int ctr_do_blocks(EVP_CIPHER_CTX *ctx, struct cipher_ctx *cipher_ctx,
                          unsigned char *out, const unsigned char *in,
                          size_t inl, size_t nblocks)
@@ -740,19 +757,14 @@ static int ctr_do_blocks(EVP_CIPHER_CTX *ctx, struct cipher_ctx *cipher_ctx,
     ret = afalg_do_cipher(ctx, out, in, inl);
     if (ret) {
         if (cipher_ctx->control_is_set) {
-            do {
-                ivlen--;
-                nblocks += iv[ivlen];
-                iv[ivlen] = (uint8_t) nblocks;
-                nblocks >>= 8;
-            } while (ivlen);
-#ifndef AFALG_KERNEL_UPDATES_CTR_IV
+            ctr_update_iv(iv, ivlen, nblocks);
+# ifndef AFALG_KERNEL_UPDATES_CTR_IV
             cipher_ctx->control_is_set = 0;
-#endif
+# endif
         } else {
-#ifndef AFALG_NO_FALLBACK
+# ifndef AFALG_NO_FALLBACK
             memcpy(iv, EVP_CIPHER_CTX_iv(cipher_ctx->fallback), ivlen);
-#endif
+# endif
         }
     }
     return ret;
@@ -779,7 +791,7 @@ static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 
     /* process full blocks */
     if (inl >= (unsigned int) cipher_ctx->blocksize) {
-        nblocks = inl/cipher_ctx->blocksize;
+        nblocks = inl / cipher_ctx->blocksize;
         len = nblocks * cipher_ctx->blocksize;
         if (!ctr_do_blocks(ctx, cipher_ctx, out, in, len, nblocks))
             return 0;
