@@ -79,9 +79,6 @@ static size_t zc_maxsize, pagemask;
 # define AFALG_DEFAULT_USE_SOFTDRIVERS AFALG_REJECT_SOFTWARE
 #endif
 static int use_softdrivers = AFALG_DEFAULT_USE_SOFTDRIVERS;
-#ifndef AFALG_NO_FALLBACK
-static int cipher_fb_threshold = -1;
-#endif
 
 /*
  * cipher/digest status & acceleration definitions
@@ -525,6 +522,22 @@ err:
 
 #ifndef AFALG_NO_FALLBACK
 static EVP_CIPHER_CTX *cipher_fb_ctx[OSSL_NELEM(cipher_data)][2] = { { NULL, }, };
+static int cipher_fb_threshold[OSSL_NELEM(cipher_data)] = { 0, };
+
+static int prepare_cipher_fallback(int i, int enc)
+{
+    cipher_fb_ctx[i][enc] = EVP_CIPHER_CTX_new();
+
+    if (!cipher_fb_ctx[i][enc])
+        return 0;
+
+    if (EVP_CipherInit_ex(cipher_fb_ctx[i][enc], cipher_data[i].fallback(),
+                          NULL, NULL, NULL, enc))
+        return 1;
+    EVP_CIPHER_CTX_free(cipher_fb_ctx[i][enc]);
+    cipher_fb_ctx[i][enc] = NULL;
+    return 0;
+}
 
 static int cipher_fb_init(struct cipher_ctx *cipher_ctx,
                           EVP_CIPHER_CTX *source_ctx,
@@ -592,10 +605,8 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
                                 enc)) {
                 fprintf(stderr, "cipher_init: Warning: Cannot set fallback key."
                                 " Fallback will not be used!\n");
-            } else if (cipher_fb_threshold == -1) {
-                    cipher_ctx->fb_threshold = cipher_d->fb_threshold;
             } else {
-                    cipher_ctx->fb_threshold = cipher_fb_threshold;
+                cipher_ctx->fb_threshold = cipher_fb_threshold[i];
             }
         }
 #endif
@@ -912,23 +923,6 @@ static EVP_CIPHER *known_cipher_methods[OSSL_NELEM(cipher_data)] = { NULL, };
 static int selected_ciphers[OSSL_NELEM(cipher_data)];
 static struct driver_info_st cipher_driver_info[OSSL_NELEM(cipher_data)];
 
-#ifndef AFALG_NO_FALLBACK
-static int prepare_cipher_fallback(int i, int enc)
-{
-    cipher_fb_ctx[i][enc] = EVP_CIPHER_CTX_new();
-
-    if (!cipher_fb_ctx[i][enc])
-        return 0;
-
-    if (EVP_CipherInit_ex(cipher_fb_ctx[i][enc], cipher_data[i].fallback(),
-                          NULL, NULL, NULL, enc))
-        return 1;
-    EVP_CIPHER_CTX_free(cipher_fb_ctx[i][enc]);
-    cipher_fb_ctx[i][enc] = NULL;
-    return 0;
-}
-#endif
-
 static int afalg_test_cipher(size_t cipher_data_index)
 {
     return (cipher_driver_info[cipher_data_index].status == AFALG_STATUS_USABLE
@@ -1017,6 +1011,7 @@ static void prepare_cipher_methods(void)
             if (cipher_data[i].fallback) {
                 prepare_cipher_fallback(i, 0);
                 prepare_cipher_fallback(i, 1);
+                cipher_fb_threshold[i] = cipher_data[i].fb_threshold;
             }
 #endif
             cipher_driver_info[i].status = AFALG_STATUS_USABLE;
@@ -1097,7 +1092,7 @@ static void afalg_select_all_ciphers(int *cipher_list, int include_ecb)
 static int afalg_select_cipher_cb(const char *str, int len, void *usr)
 {
     int *cipher_list = (int *)usr;
-    char *name;
+    char *name, *fb;
     const EVP_CIPHER *EVP;
     size_t i;
 
@@ -1105,13 +1100,25 @@ static int afalg_select_cipher_cb(const char *str, int len, void *usr)
         return 1;
     if (usr == NULL || (name = OPENSSL_strndup(str, len)) == NULL)
         return 0;
+    /* Even thought it is useful only with fallback enabled, keep the check here
+     * so that the same config file works with or without AFALG_NO_FALLBACK */
+    if ((fb = index(name, ':'))) {
+        *(fb) = '\0';
+        fb++;
+    }
     EVP = EVP_get_cipherbyname(name);
-    if (EVP == NULL)
+    if (EVP == NULL) {
         fprintf(stderr, "afalg: unknown cipher %s\n", name);
-    else if ((i = find_cipher_data_index(EVP_CIPHER_nid(EVP))) != (size_t)-1)
+    } else if ((i = find_cipher_data_index(EVP_CIPHER_nid(EVP))) != (size_t)-1) {
         cipher_list[i] = 1;
-    else
+#ifndef AFALG_NO_FALLBACK
+        if (fb && (cipher_fb_threshold[i] = atoi(fb)) < 0) {
+            cipher_fb_threshold[i] = cipher_data[i].fb_threshold;
+        }
+#endif
+    } else {
         fprintf(stderr, "afalg: cipher %s not available\n", name);
+    }
     OPENSSL_free(name);
     return 1;
 }
@@ -1279,7 +1286,7 @@ static size_t get_digest_data_index(int nid)
 
 #ifndef AFALG_NO_FALLBACK
 static EVP_MD_CTX *digest_fb_ctx[OSSL_NELEM(digest_data)] = { NULL, };
-static int digest_fb_threshold = -1;
+static int digest_fb_threshold[OSSL_NELEM(cipher_data)] = { 0, };
 
 static int digest_use_fb(const EVP_MD_CTX *fallback, const void *data,
                          size_t len, unsigned char *res)
@@ -1310,10 +1317,7 @@ static int digest_init(EVP_MD_CTX *ctx)
 #ifndef AFALG_NO_FALLBACK
     if (digest_fb_ctx[i]) {
         digest_ctx->fallback = digest_fb_ctx[i];
-        if (digest_fb_threshold == -1)
-            digest_ctx->fb_threshold = digest_data[i].fb_threshold;
-        else
-            digest_ctx->fb_threshold = digest_fb_threshold;
+        digest_ctx->fb_threshold = digest_fb_threshold[i];
     }
 #endif
     return 1;
@@ -1617,8 +1621,10 @@ static void prepare_digest_methods(void)
             known_digest_methods[i] = NULL;
         } else {
 #ifndef AFALG_NO_FALLBACK
-            if (digest_data[i].fallback)
+            if (digest_data[i].fallback) {
                 digest_fb_ctx[i] = get_digest_fb_ctx(digest_data[i].fallback());
+                digest_fb_threshold[i] = digest_data[i].fb_threshold;
+            }
 #endif
             digest_driver_info[i].status = AFALG_STATUS_USABLE;
         }
@@ -1676,7 +1682,7 @@ static void afalg_select_all_digests(int *digest_list)
 static int afalg_select_digest_cb(const char *str, int len, void *usr)
 {
     int *digest_list = (int *)usr;
-    char *name;
+    char *name, *fb;
     const EVP_MD *EVP;
     size_t i;
 
@@ -1684,13 +1690,25 @@ static int afalg_select_digest_cb(const char *str, int len, void *usr)
         return 1;
     if (usr == NULL || (name = OPENSSL_strndup(str, len)) == NULL)
         return 0;
+    /* Even thought it is useful only with fallback enabled, keep the check here
+     * so that the same config file works with or without AFALG_NO_FALLBACK */
+    if ((fb = index(name, ':'))) {
+        *(fb) = '\0';
+        fb++;
+    }
     EVP = EVP_get_digestbyname(name);
-    if (EVP == NULL)
+    if (EVP == NULL) {
         fprintf(stderr, "afalg: unknown digest %s\n", name);
-    else if ((i = find_digest_data_index(EVP_MD_type(EVP))) != (size_t)-1)
+    } else if ((i = find_digest_data_index(EVP_MD_type(EVP))) != (size_t)-1) {
         digest_list[i] = 1;
-    else
+#ifndef AFALG_NO_FALLBACK
+        if (fb && (digest_fb_threshold[i] = atoi(fb)) < 0) {
+            digest_fb_threshold[i] = digest_data[i].fb_threshold;
+        }
+#endif
+    } else {
         fprintf(stderr, "afalg: digest %s not available\n", name);
+    }
     OPENSSL_free(name);
     return 1;
 }
@@ -1753,12 +1771,6 @@ enum {
 #ifdef AFALG_DIGESTS
     AFALG_CMD_DIGESTS,
 #endif
-#ifndef AFALG_NO_FALLBACK
-    AFALG_CMD_CIPHER_THRESHOLD,
-# ifdef AFALG_DIGESTS
-    AFALG_CMD_MD_THRESHOLD,
-# endif
-#endif
     AFALG_CMD_DUMP_INFO
 };
 
@@ -1781,32 +1793,29 @@ static const ENGINE_CMD_DEFN afalg_cmds[] = {
 
     {AFALG_CMD_CIPHERS,
      "CIPHERS",
-     "either ALL, NONE, NO_ECB (all except ECB-mode) or a comma-separated list of ciphers to enable [default=NO_ECB]",
+     "either ALL, NONE, NO_ECB (all except ECB-mode) or a comma-separated"
+     " list of ciphers to enable"
+#ifndef AFALG_NO_FALLBACK
+     ". If you use a list, each cipher may be followed by a colon (:) and the"
+     " minimum request length to use AF_ALG drivers for that cipher; smaller"
+     " requests are processed by softare; a negative value will use the"
+     " default for that cipher; use DUMP_INFO to see the ciphers that support"
+     " software fallback, and their default values"
+#endif
+     " [default=NO_ECB]",
      ENGINE_CMD_FLAG_STRING},
 
 #ifdef AFALG_DIGESTS
    {AFALG_CMD_DIGESTS,
      "DIGESTS",
-     "either ALL, NONE, or a comma-separated list of digests to enable [default=NONE]",
-     ENGINE_CMD_FLAG_STRING},
-#endif
-
+     "either ALL, NONE, or a comma-separated list of digests to enable"
 #ifndef AFALG_NO_FALLBACK
-   {AFALG_CMD_CIPHER_THRESHOLD,
-     "CIPHER_SOFT_THRESHOLD",
-     "set the mininum request length to use AF_ALG drivers for ciphers;"
-     " smaller requests are processed by software. Set to -1 to use"
-     " predetermined values that vary by mode and key size (use DUMP_INFO to"
-     " see them). The default values are variable, but any value entered here"
-     " applies to all ciphers [default=-1]",
-     ENGINE_CMD_FLAG_NUMERIC},
-# ifdef AFALG_DIGESTS
-   {AFALG_CMD_MD_THRESHOLD,
-     "MD_SOFT_THRESHOLD",
-     "set the mininum request length to use AF_ALG drivers for Message Digests;"
-     " smaller requests are processed by software [default=16384]",
-     ENGINE_CMD_FLAG_NUMERIC},
-# endif
+     ". If you use a list, each digest may be followed by a colon (:) and the"
+     " minimum request length to use AF_ALG drivers for that digest; a negative"
+     " value will use the default (16384) for that digest"
+#endif
+     " [default=NONE]",
+     ENGINE_CMD_FLAG_STRING},
 #endif
 
    {AFALG_CMD_DUMP_INFO,
@@ -1883,22 +1892,6 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
         }
         rebuild_known_digest_nids(e);
         return 1;
-#endif
-
-#ifndef AFALG_NO_FALLBACK
-    case AFALG_CMD_CIPHER_THRESHOLD:
-        if (i < -1)
-            return 0;
-        cipher_fb_threshold = i;
-        return 1;
-
-# ifdef AFALG_DIGESTS
-    case AFALG_CMD_MD_THRESHOLD:
-        if (i < 0)
-            return 0;
-        digest_fb_threshold = i;
-        return 1;
-# endif
 #endif
 
     case AFALG_CMD_DUMP_INFO:
