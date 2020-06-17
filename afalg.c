@@ -1084,8 +1084,8 @@ static void afalg_select_all_ciphers(int *cipher_list, int include_ecb)
         if (include_ecb ||
            ((cipher_data[i].flags & EVP_CIPH_MODE) != EVP_CIPH_ECB_MODE))
             cipher_list[i] = 1;
-       else
-           cipher_list[i] = 0;
+        else
+            cipher_list[i] = 0;
     }
 }
 
