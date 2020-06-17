@@ -1,0 +1,6 @@
+BasedOnStyle: WebKit
+AlignAfterOpenBracket: Align
+AlignConsecutiveMacros: true
+AlignTrailingComments: true
+BreakBeforeBinaryOperators: NonAssignment
+DerivePointerAlignment: true
