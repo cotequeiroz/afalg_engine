@@ -29,16 +29,16 @@
 static size_t zc_maxsize, pagemask;
 #endif
 
+#include <asm/byteorder.h>
+#include <asm/types.h>
+#include <assert.h>
+#include <fcntl.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <fcntl.h>
-#include <sys/ioctl.h>
 #include <unistd.h>
-#include <assert.h>
-#include <asm/byteorder.h>
-#include <asm/types.h>
 #ifndef AFALG_NO_CRYPTOUSER
 # include <linux/cryptouser.h>
 #elif !defined(CRYPTO_MAX_NAME)
@@ -49,9 +49,9 @@ static size_t zc_maxsize, pagemask;
 #include <linux/rtnetlink.h>
 
 #include <openssl/conf.h>
-#include <openssl/evp.h>
-#include <openssl/err.h>
 #include <openssl/engine.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
 #include <openssl/objects.h>
 
 /* linux/crypto.h is not public, so we must define the type and masks here,
