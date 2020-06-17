@@ -224,7 +224,7 @@ static int prepare_afalg_alg_list(void)
         if ((msg_len = recvmsg(nlfd, &msg, 0)) <= 0) {
             if (errno == EINTR || errno == EAGAIN)
                 continue;
-            else if (msg_len == 0)
+            if (msg_len == 0)
                 perror("Nelink error: no data");
             else
                 perror("Nelink error: netlink receive error");
