@@ -18,6 +18,10 @@ project(afalg_engine LANGUAGES C)
 include(CheckIncludeFile)
 
 find_package(OpenSSL 1.1.0 REQUIRED)
+if (NOT OPENSSL_VERSION_MAJOR EQUAL 1)
+	message( WARNING "OpenSSL >= 3.0.0 support is experimental.  Disabling fallback, AES-256-CTR, and AES-256-ECB support." )
+endif()
+
 include_directories(${OPENSSL_INCLUDE_DIR})
 
 # Remove when https://gitlab.kitware.com/cmake/cmake/issues/18525 is addressed
@@ -56,8 +60,8 @@ if (DIGESTS)
 	add_definitions(-DAFALG_DIGESTS)
 endif()
 
-option(FALLBACK "Fallback to using software to perform smaller cipher operations" ON)
-if (NOT FALLBACK)
+option(FALLBACK "Fallback to using software to perform smaller cipher operations (OpenSSL 1.1 only)" ON)
+if (NOT FALLBACK OR NOT OPENSSL_VERSION_MAJOR EQUAL 1)
 	add_definitions(-DAFALG_NO_FALLBACK)
 endif()
 

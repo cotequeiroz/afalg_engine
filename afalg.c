@@ -66,6 +66,11 @@ static size_t zc_maxsize, pagemask;
 # define CRYPTO_ALG_INTERNAL             0x00002000
 #endif
 
+#ifndef OPENSSL_VERSION_PREREQ
+# define OPENSSL_VERSION_PREREQ(maj,min)                                \
+    ((OPENSSL_VERSION_MAJOR << 16) + OPENSSL_VERSION_MINOR >= ((maj) << 16) + (min))
+#endif
+
 #ifndef OSSL_NELEM
 # define OSSL_NELEM(x)                (sizeof(x)/sizeof((x)[0]))
 #endif
@@ -361,14 +366,14 @@ struct cipher_ctx {
 static const struct cipher_data_st cipher_data[] = {
 #ifndef OPENSSL_NO_DES
     { NID_des_cbc, 8, 8, 8, EVP_CIPH_CBC_MODE, "cbc(des)",
-#ifndef AFALG_NO_FALLBACK
+# ifndef AFALG_NO_FALLBACK
       EVP_des_cbc, 320
-#endif
+# endif
     },
     { NID_des_ede3_cbc, 8, 24, 8, EVP_CIPH_CBC_MODE, "cbc(des3_ede)",
-#ifndef AFALG_NO_FALLBACK
+# ifndef AFALG_NO_FALLBACK
       EVP_des_ede3_cbc, 96
-#endif
+# endif
     },
 #endif
 #ifndef OPENSSL_NO_BF
@@ -402,11 +407,13 @@ static const struct cipher_data_st cipher_data[] = {
       EVP_aes_192_ctr, 1152
 #endif
     },
+#if !OPENSSL_VERSION_PREREQ(3,0)
     { NID_aes_256_ctr, 16, 256 / 8, 16, EVP_CIPH_CTR_MODE, "ctr(aes)",
-#ifndef AFALG_NO_FALLBACK
+# ifndef AFALG_NO_FALLBACK
       EVP_aes_256_ctr, 960
-#endif
+# endif
     },
+#endif
     { NID_aes_128_ecb, 16, 128 / 8, 0, EVP_CIPH_ECB_MODE, "ecb(aes)",
 #ifndef AFALG_NO_FALLBACK
       EVP_aes_128_ecb, 2048
@@ -417,11 +424,13 @@ static const struct cipher_data_st cipher_data[] = {
       EVP_aes_192_ecb, 1440
 #endif
     },
+#if !OPENSSL_VERSION_PREREQ(3,0)
     { NID_aes_256_ecb, 16, 256 / 8, 0, EVP_CIPH_ECB_MODE, "ecb(aes)",
-#ifndef AFALG_NO_FALLBACK
+# ifndef AFALG_NO_FALLBACK
       EVP_aes_256_ecb, 1152
-#endif
+# endif
     },
+#endif
 #if 0
 /* Current camellia kernel module does not implement the skcipher
  * interface, necessary to work with AF_ALG */
