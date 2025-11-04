@@ -1,3 +1,6 @@
+1.2.1:
+- Allow building with CMake 4.0
+
 1.2.0:
 - Use software as a fallback when en/decrypting small batches, or when the
 total length of the digest input is small; this greatly improves performace
